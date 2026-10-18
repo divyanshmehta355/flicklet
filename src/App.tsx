@@ -1,14 +1,17 @@
 import { useState, useEffect, type FormEvent } from "react";
 import {
   AlertCircle,
+  ArrowRight,
   CheckCircle2,
   Clapperboard,
   Compass,
   Eye,
   EyeOff,
   Film,
+  FolderCheck,
   FolderHeart,
   FolderOpen,
+  FolderTree,
   Heart,
   Key,
   Loader2,
@@ -16,8 +19,11 @@ import {
   RefreshCw,
   Search,
   Settings,
+  ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Tv,
+  Undo2,
   WandSparkles,
   X,
 } from "lucide-react";
@@ -77,6 +83,47 @@ interface SceneSearchResult {
   is_estimate: boolean;
   confidence: string;
   explanation: string;
+}
+
+interface OrganizePlanItem {
+  id: string;
+  source_path: string;
+  target_path: string;
+  proposed_relative_path: string;
+  display_title: string;
+  media_type: string;
+  genre: string;
+  year: number | null;
+  is_selected: boolean;
+  has_collision: boolean;
+  collision_resolution: string;
+  is_across_drives: boolean;
+  is_read_only: boolean;
+  is_system_path: boolean;
+  warning: string | null;
+}
+
+interface OrganizePreviewReport {
+  target_root: string;
+  items: OrganizePlanItem[];
+  total_files: number;
+  cross_drive_count: number;
+  collision_count: number;
+  blocked_count: number;
+}
+
+interface OrganizeExecutionResult {
+  batch_id: string;
+  successful_moves: number;
+  failed_moves: number;
+  skipped_moves: number;
+  errors: string[];
+}
+
+interface RollbackBatchSummary {
+  batch_id: string;
+  timestamp: number;
+  file_count: number;
 }
 
 interface ApiKeyStatus {
@@ -154,6 +201,7 @@ const navItems = [
   { label: "All movies", icon: Film },
   { label: "TV shows", icon: Tv },
   { label: "Collections", icon: FolderHeart },
+  { label: "Organize", icon: FolderTree },
 ];
 
 function App() {
@@ -197,6 +245,21 @@ function App() {
   const [adjustedTimestamp, setAdjustedTimestamp] = useState<number | null>(null);
   const [isVlcAvailable, setIsVlcAvailable] = useState<boolean>(false);
   const [playbackMessage, setPlaybackMessage] = useState<string | null>(null);
+
+  // Safe File Organization state
+  const [organizeTargetRoot, setOrganizeTargetRoot] = useState<string>("");
+  const [organizePreview, setOrganizePreview] = useState<OrganizePreviewReport | null>(null);
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [confirmAgreed, setConfirmAgreed] = useState(false);
+  const [isExecutingOrganize, setIsExecutingOrganize] = useState(false);
+  const [lastExecutionResult, setLastExecutionResult] = useState<OrganizeExecutionResult | null>(null);
+  const [rollbackHistory, setRollbackHistory] = useState<RollbackBatchSummary[]>([]);
+  const [isRollingBack, setIsRollingBack] = useState(false);
+  const [organizeMessage, setOrganizeMessage] = useState<{
+    type: "success" | "error" | "info";
+    text: string;
+  } | null>(null);
 
   // Load existing persistent catalog, API key status, and check VLC on launch
   useEffect(() => {
@@ -520,6 +583,192 @@ function App() {
       })
     : null;
 
+  // Load rollback history
+  async function loadRollbackHistory() {
+    try {
+      const history = await invoke<RollbackBatchSummary[]>("get_rollback_history");
+      setRollbackHistory(history);
+    } catch (err) {
+      console.error("Failed to load rollback history:", err);
+    }
+  }
+
+  // Browse destination directory for organization
+  async function handleBrowseOrganizeTarget() {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Destination Folder for Organized Library",
+      });
+      if (selected) {
+        const path = typeof selected === "string" ? selected : selected[0];
+        setOrganizeTargetRoot(path);
+        if (catalogItems.length > 0) {
+          handleGeneratePreview(path);
+        }
+      }
+    } catch (err) {
+      console.error("Target folder picker failed:", err);
+    }
+  }
+
+  // Generate Dry-Run Preview
+  async function handleGeneratePreview(targetOverride?: string) {
+    const target = targetOverride || organizeTargetRoot;
+    if (!target.trim()) {
+      setOrganizeMessage({
+        type: "error",
+        text: "Please select or enter a target destination directory.",
+      });
+      return;
+    }
+
+    setIsLoadingPreview(true);
+    setOrganizeMessage(null);
+    try {
+      const report = await invoke<OrganizePreviewReport>("preview_organize", {
+        targetRoot: target.trim(),
+        itemIds: null,
+      });
+      setOrganizePreview(report);
+    } catch (err) {
+      setOrganizeMessage({
+        type: "error",
+        text: `Preview failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setIsLoadingPreview(false);
+    }
+  }
+
+  // Toggle selection of a single item in organize preview
+  function handleToggleSelectItem(id: string) {
+    if (!organizePreview) return;
+    setOrganizePreview({
+      ...organizePreview,
+      items: organizePreview.items.map((item) =>
+        item.id === id && !item.is_system_path && !item.is_read_only
+          ? { ...item, is_selected: !item.is_selected }
+          : item
+      ),
+    });
+  }
+
+  // Toggle selection for all eligible items
+  function handleToggleSelectAll(selectAll: boolean) {
+    if (!organizePreview) return;
+    setOrganizePreview({
+      ...organizePreview,
+      items: organizePreview.items.map((item) =>
+        item.is_system_path || item.is_read_only
+          ? item
+          : { ...item, is_selected: selectAll }
+      ),
+    });
+  }
+
+  // Change collision resolution per item ("keep_both" | "skip")
+  function handleChangeCollisionResolution(id: string, resolution: string) {
+    if (!organizePreview) return;
+    setOrganizePreview({
+      ...organizePreview,
+      items: organizePreview.items.map((item) =>
+        item.id === id ? { ...item, collision_resolution: resolution } : item
+      ),
+    });
+  }
+
+  // Execute organization after double confirmation
+  async function handleExecuteOrganize() {
+    if (!organizePreview || !confirmAgreed) return;
+    setIsExecutingOrganize(true);
+    setOrganizeMessage(null);
+
+    try {
+      const result = await invoke<OrganizeExecutionResult>("execute_organize", {
+        plan: organizePreview.items,
+        doubleConfirmed: true,
+      });
+
+      setLastExecutionResult(result);
+      setShowConfirmModal(false);
+      setConfirmAgreed(false);
+
+      // Refresh persistent catalog from SQLite
+      const updatedCatalog = await invoke<CatalogItem[]>("get_catalog");
+      setCatalogItems(updatedCatalog);
+
+      // Refresh rollback history
+      await loadRollbackHistory();
+
+      // Refresh dry-run preview report
+      await handleGeneratePreview();
+
+      setOrganizeMessage({
+        type: "success",
+        text: `Successfully organized ${result.successful_moves} files into genre folders! (Batch: ${result.batch_id.slice(0, 8)})`,
+      });
+    } catch (err) {
+      setOrganizeMessage({
+        type: "error",
+        text: `Organization error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setIsExecutingOrganize(false);
+    }
+  }
+
+  // Rollback an executed batch
+  async function handleRollbackBatch(batchId: string) {
+    const confirmed = window.confirm(
+      "Are you sure you want to undo this organization batch? Files will be restored to their previous locations."
+    );
+    if (!confirmed) return;
+
+    setIsRollingBack(true);
+    setOrganizeMessage(null);
+    try {
+      const restoredCount = await invoke<number>("rollback_organize", { batchId });
+
+      // Refresh catalog and history
+      const updatedCatalog = await invoke<CatalogItem[]>("get_catalog");
+      setCatalogItems(updatedCatalog);
+      await loadRollbackHistory();
+      if (organizeTargetRoot) {
+        await handleGeneratePreview();
+      }
+
+      setOrganizeMessage({
+        type: "success",
+        text: `Rollback complete! Successfully restored ${restoredCount} files to their original paths.`,
+      });
+    } catch (err) {
+      setOrganizeMessage({
+        type: "error",
+        text: `Rollback failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setIsRollingBack(false);
+    }
+  }
+
+  // Auto-load rollback history and preview when entering Organize tab
+  useEffect(() => {
+    if (activeNav === "Organize") {
+      loadRollbackHistory();
+      if (!organizeTargetRoot && selectedFolder) {
+        const defaultTarget = `${selectedFolder}\\Organized Cinema`;
+        setOrganizeTargetRoot(defaultTarget);
+        if (catalogItems.length > 0) {
+          handleGeneratePreview(defaultTarget);
+        }
+      } else if (organizeTargetRoot && !organizePreview && catalogItems.length > 0) {
+        handleGeneratePreview(organizeTargetRoot);
+      }
+    }
+  }, [activeNav, catalogItems.length, organizeTargetRoot, selectedFolder]);
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -689,6 +938,322 @@ function App() {
                 .
               </div>
             </div>
+          </div>
+        ) : activeNav === "Organize" ? (
+          /* Safe File Organization View */
+          <div className="organize-view">
+            <div className="organize-intro-card">
+              <div className="eyebrow" style={{ marginBottom: 6 }}>
+                <Sparkles size={15} /> SAFE PERSONAL CINEMA ORGANIZER
+              </div>
+              <h2>Organize Library &amp; Dry-Run Preview</h2>
+              <p>
+                Flicklet structures your movie and series collection into an elegant, standard genre layout without touching anything without your double-confirmed approval.
+              </p>
+
+              <div className="safety-pill-row">
+                <span className="safety-pill">
+                  <ShieldCheck size={14} /> Dry-run preview first
+                </span>
+                <span className="safety-pill">
+                  <ShieldCheck size={14} /> Name collision detection
+                </span>
+                <span className="safety-pill">
+                  <ShieldCheck size={14} /> Cross-drive copy verification
+                </span>
+                <span className="safety-pill">
+                  <ShieldCheck size={14} /> System &amp; read-only protection
+                </span>
+                <span className="safety-pill">
+                  <Undo2 size={14} /> 1-Click rollback ledger
+                </span>
+              </div>
+            </div>
+
+            {/* Destination Configuration */}
+            <div className="organize-config-card">
+              <div className="organize-config-title">Destination Library Folder</div>
+              <div className="organize-target-row">
+                <input
+                  type="text"
+                  className="organize-target-input"
+                  value={organizeTargetRoot}
+                  onChange={(e) => setOrganizeTargetRoot(e.target.value)}
+                  placeholder="e.g. D:\Movies\Organized Cinema"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={handleBrowseOrganizeTarget}
+                >
+                  <FolderOpen size={14} />
+                  <span>Browse Destination...</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => handleGeneratePreview()}
+                  disabled={isLoadingPreview || !organizeTargetRoot.trim() || catalogItems.length === 0}
+                >
+                  {isLoadingPreview ? (
+                    <>
+                      <Loader2 size={14} className="spin-icon" />
+                      <span>Generating Preview...</span>
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw size={14} />
+                      <span>Generate Preview</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              {catalogItems.length === 0 && (
+                <p style={{ margin: "8px 0 0", fontSize: 11, color: "var(--muted)" }}>
+                  💡 Please scan a folder from the Home screen first so Flicklet has titles to organize.
+                </p>
+              )}
+            </div>
+
+            {organizeMessage && (
+              <div
+                className={`status-callout ${organizeMessage.type}`}
+                style={{ marginTop: 16 }}
+              >
+                {organizeMessage.type === "success" && <CheckCircle2 size={16} />}
+                {organizeMessage.type === "error" && <AlertCircle size={16} />}
+                {organizeMessage.type === "info" && <Sparkles size={16} />}
+                <span>{organizeMessage.text}</span>
+              </div>
+            )}
+
+            {lastExecutionResult && (
+              <div
+                className="status-callout info"
+                style={{ marginTop: 12 }}
+              >
+                <FolderCheck size={16} />
+                <span>
+                  Last execution summary: {lastExecutionResult.successful_moves} moved
+                  {lastExecutionResult.skipped_moves > 0 &&
+                    `, ${lastExecutionResult.skipped_moves} skipped`}
+                  {lastExecutionResult.failed_moves > 0 &&
+                    `, ${lastExecutionResult.failed_moves} failed`}
+                  .
+                </span>
+              </div>
+            )}
+
+            {/* Preview Report */}
+            {organizePreview && (
+              <>
+                <div className="preview-stats-row">
+                  <div className="stat-card">
+                    <div className="stat-number">{organizePreview.total_files}</div>
+                    <div className="stat-label">Total Titles</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-number">
+                      {organizePreview.items.filter((i) => i.is_selected).length}
+                    </div>
+                    <div className="stat-label">Selected to Move</div>
+                  </div>
+                  <div
+                    className={`stat-card ${
+                      organizePreview.collision_count > 0 ? "warn" : ""
+                    }`}
+                  >
+                    <div className="stat-number">{organizePreview.collision_count}</div>
+                    <div className="stat-label">Collisions</div>
+                  </div>
+                  <div
+                    className={`stat-card ${
+                      organizePreview.cross_drive_count > 0 ? "warn" : ""
+                    }`}
+                  >
+                    <div className="stat-number">
+                      {organizePreview.cross_drive_count}
+                    </div>
+                    <div className="stat-label">Cross-Drive Moves</div>
+                  </div>
+                  <div
+                    className={`stat-card ${
+                      organizePreview.blocked_count > 0 ? "blocked" : ""
+                    }`}
+                  >
+                    <div className="stat-number">{organizePreview.blocked_count}</div>
+                    <div className="stat-label">Blocked / Safe</div>
+                  </div>
+                </div>
+
+                <div className="preview-table-wrapper">
+                  <div className="preview-table-header">
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <button
+                        type="button"
+                        className="btn-nudge"
+                        onClick={() => handleToggleSelectAll(true)}
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-nudge"
+                        onClick={() => handleToggleSelectAll(false)}
+                      >
+                        Deselect All
+                      </button>
+                      <span>
+                        Showing {organizePreview.items.length} proposed file moves
+                      </span>
+                    </div>
+                    <span style={{ fontSize: 10, color: "var(--muted)" }}>
+                      Source Path → Target Path
+                    </span>
+                  </div>
+
+                  <div className="preview-list">
+                    {organizePreview.items.map((item) => (
+                      <div
+                        key={item.id}
+                        className={`preview-item ${
+                          item.is_system_path || item.is_read_only ? "blocked" : ""
+                        } ${item.has_collision ? "has-collision" : ""}`}
+                      >
+                        <div>
+                          <input
+                            type="checkbox"
+                            checked={item.is_selected}
+                            disabled={item.is_system_path || item.is_read_only}
+                            onChange={() => handleToggleSelectItem(item.id)}
+                            style={{ cursor: "pointer" }}
+                          />
+                        </div>
+
+                        <div className="source-path-box">
+                          <div className="path-title">
+                            <span>{item.display_title}</span>
+                            <span className="genre-chip" style={{ margin: 0, padding: "2px 6px" }}>
+                              {item.genre}
+                            </span>
+                          </div>
+                          <span title={item.source_path}>{item.source_path}</span>
+                        </div>
+
+                        <div className="arrow-icon">
+                          <ArrowRight size={15} />
+                        </div>
+
+                        <div className="target-path-box">
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                            {item.has_collision && (
+                              <span className="badge-collision" title="Target already exists on disk">
+                                ⚠️ Collision
+                              </span>
+                            )}
+                            {item.is_across_drives && (
+                              <span className="badge-cross-drive" title="Cross-drive move requires copy & byte verification">
+                                💽 Cross-Drive
+                              </span>
+                            )}
+                            {(item.is_system_path || item.is_read_only) && (
+                              <span className="badge-blocked">
+                                ⛔ Blocked
+                              </span>
+                            )}
+                          </div>
+                          <span title={item.target_path}>{item.proposed_relative_path}</span>
+                        </div>
+
+                        <div>
+                          {item.has_collision ? (
+                            <select
+                              className="collision-select"
+                              value={item.collision_resolution}
+                              onChange={(e) =>
+                                handleChangeCollisionResolution(
+                                  item.id,
+                                  e.target.value
+                                )
+                              }
+                            >
+                              <option value="keep_both">Keep both (append &apos; (1)&apos;)</option>
+                              <option value="skip">Skip file</option>
+                            </select>
+                          ) : (
+                            <span style={{ fontSize: 10, color: "var(--muted)" }}>
+                              {item.is_selected ? "Ready" : "Excluded"}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="organize-bottom-bar">
+                    <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                      <strong>
+                        {organizePreview.items.filter((i) => i.is_selected).length}
+                      </strong>{" "}
+                      of {organizePreview.items.length} files selected to move
+                    </div>
+
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={
+                        organizePreview.items.filter((i) => i.is_selected).length === 0
+                      }
+                      onClick={() => {
+                        setConfirmAgreed(false);
+                        setShowConfirmModal(true);
+                      }}
+                    >
+                      <ShieldCheck size={14} />
+                      <span>Review &amp; Double Confirm Move...</span>
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Rollback Ledger History */}
+            {rollbackHistory.length > 0 && (
+              <div className="rollback-history-card">
+                <div className="organize-config-title">Rollback History &amp; Undo</div>
+                <p style={{ margin: "0 0 12px", fontSize: 11, color: "var(--muted)" }}>
+                  Every organization operation is securely journaled in your local SQLite ledger so you can restore files back to their previous locations anytime.
+                </p>
+
+                {rollbackHistory.map((batch) => (
+                  <div key={batch.batch_id} className="rollback-item">
+                    <div className="rollback-item-info">
+                      <Undo2 size={15} style={{ color: "var(--cherry)" }} />
+                      <div>
+                        <strong>{batch.file_count} files organized</strong>
+                        <div className="rollback-batch-tag">
+                          Batch ID: {batch.batch_id} ·{" "}
+                          {new Date(batch.timestamp * 1000).toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => handleRollbackBatch(batch.batch_id)}
+                      disabled={isRollingBack}
+                    >
+                      {isRollingBack ? (
+                        <Loader2 size={13} className="spin-icon" />
+                      ) : (
+                        <Undo2 size={13} />
+                      )}
+                      <span>Undo / Rollback</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           /* Main Library View */
@@ -1039,6 +1604,17 @@ function App() {
                         className={isScanning ? "spin-icon" : ""}
                       />
                       <span>{isScanning ? "Scanning..." : "Rescan"}</span>
+                    </button>
+                  )}
+                  {hasCatalog && (
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => setActiveNav("Organize")}
+                      title="Preview and organize library into genre folders"
+                    >
+                      <FolderTree size={13} />
+                      <span>Organize</span>
                     </button>
                   )}
                   <button
@@ -1470,6 +2046,105 @@ function App() {
                     <CheckCircle2 size={13} />
                   )}
                   <span>Accept &amp; Save</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Double Confirmation Modal for Safe Organization */}
+        {showConfirmModal && organizePreview && (
+          <div
+            className="modal-backdrop"
+            onClick={() => {
+              if (!isExecutingOrganize) setShowConfirmModal(false);
+            }}
+          >
+            <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <div className="eyebrow" style={{ marginBottom: 4 }}>
+                    <ShieldAlert size={14} color="var(--cherry)" /> DOUBLE CONFIRMATION REQUIRED
+                  </div>
+                  <h3>Confirm Library Reorganization</h3>
+                </div>
+                <button
+                  type="button"
+                  className="btn-icon-close"
+                  onClick={() => {
+                    if (!isExecutingOrganize) setShowConfirmModal(false);
+                  }}
+                  disabled={isExecutingOrganize}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="confirm-callout">
+                <strong>Safety check before moving files:</strong>
+                <br />
+                You are about to organize{" "}
+                <strong>
+                  {organizePreview.items.filter((i) => i.is_selected).length} files
+                </strong>{" "}
+                into standard genre folders at:
+                <br />
+                <code
+                  style={{
+                    display: "block",
+                    margin: "6px 0",
+                    padding: "4px 8px",
+                    background: "#fff8f9",
+                    borderRadius: 6,
+                    fontSize: 10,
+                    wordBreak: "break-all",
+                  }}
+                >
+                  {organizeTargetRoot}
+                </code>
+                • A rollback entry will be recorded so you can undo this anytime.
+                <br />
+                • Destination byte sizes are verified before source files are removed.
+                <br />
+                • Blocked system files and read-only files are preserved automatically.
+              </div>
+
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={confirmAgreed}
+                  onChange={(e) => setConfirmAgreed(e.target.checked)}
+                  disabled={isExecutingOrganize}
+                />
+                <span>I have reviewed the preview and approve moving these files.</span>
+              </label>
+
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setShowConfirmModal(false)}
+                  disabled={isExecutingOrganize}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={!confirmAgreed || isExecutingOrganize}
+                  onClick={handleExecuteOrganize}
+                >
+                  {isExecutingOrganize ? (
+                    <>
+                      <Loader2 size={13} className="spin-icon" />
+                      <span>Moving files safely...</span>
+                    </>
+                  ) : (
+                    <>
+                      <FolderCheck size={13} />
+                      <span>Execute Organization</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>

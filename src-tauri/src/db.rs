@@ -91,6 +91,23 @@ fn init_schema(conn: &Connection) -> SqlResult<()> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS rollback_logs (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL,
+            original_path TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            catalog_item_id TEXT,
+            timestamp INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rollback_batch ON rollback_logs(batch_id)",
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -331,4 +348,122 @@ pub fn update_catalog_metadata(
     )?;
     Ok(())
 }
+
+pub fn update_item_path(
+    conn: &Connection,
+    id: &str,
+    new_path: &str,
+    new_filename: &str,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE media_catalog SET path = ?1, filename = ?2 WHERE id = ?3",
+        params![new_path, new_filename, id],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackLogEntry {
+    pub id: String,
+    pub batch_id: String,
+    pub original_path: String,
+    pub target_path: String,
+    pub catalog_item_id: Option<String>,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackBatchSummary {
+    pub batch_id: String,
+    pub timestamp: u64,
+    pub file_count: usize,
+}
+
+pub fn record_rollback_entry(
+    conn: &Connection,
+    batch_id: &str,
+    original_path: &str,
+    target_path: &str,
+    catalog_item_id: Option<&str>,
+) -> SqlResult<()> {
+    let id = Uuid::new_v4().to_string();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    conn.execute(
+        "INSERT INTO rollback_logs (id, batch_id, original_path, target_path, catalog_item_id, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, batch_id, original_path, target_path, catalog_item_id, now as i64],
+    )?;
+    Ok(())
+}
+
+pub fn get_rollback_batch_entries(
+    conn: &Connection,
+    batch_id: &str,
+) -> SqlResult<Vec<RollbackLogEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, batch_id, original_path, target_path, catalog_item_id, timestamp
+         FROM rollback_logs
+         WHERE batch_id = ?1
+         ORDER BY timestamp DESC",
+    )?;
+
+    let rows = stmt.query_map(params![batch_id], |row| {
+        let ts: i64 = row.get(5)?;
+        Ok(RollbackLogEntry {
+            id: row.get(0)?,
+            batch_id: row.get(1)?,
+            original_path: row.get(2)?,
+            target_path: row.get(3)?,
+            catalog_item_id: row.get(4)?,
+            timestamp: ts.max(0) as u64,
+        })
+    })?;
+
+    let mut entries = Vec::new();
+    for r in rows {
+        entries.push(r?);
+    }
+    Ok(entries)
+}
+
+pub fn delete_rollback_batch(conn: &Connection, batch_id: &str) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM rollback_logs WHERE batch_id = ?1",
+        params![batch_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_recent_rollback_batches(
+    conn: &Connection,
+) -> SqlResult<Vec<RollbackBatchSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT batch_id, MAX(timestamp) as ts, COUNT(*) as cnt
+         FROM rollback_logs
+         GROUP BY batch_id
+         ORDER BY ts DESC
+         LIMIT 10",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        let ts: i64 = row.get(1)?;
+        let cnt: i64 = row.get(2)?;
+        Ok(RollbackBatchSummary {
+            batch_id: row.get(0)?,
+            timestamp: ts.max(0) as u64,
+            file_count: cnt.max(0) as usize,
+        })
+    })?;
+
+    let mut list = Vec::new();
+    for r in rows {
+        list.push(r?);
+    }
+    Ok(list)
+}
+
 

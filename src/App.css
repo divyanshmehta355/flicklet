@@ -1482,6 +1482,340 @@ select:focus-visible {
   transform: scale(1.05);
 }
 
+/* Safe File Organization Preview Styles */
+
+.organize-view {
+  max-width: 1040px;
+  margin: 0 auto 50px;
+}
+
+.organize-intro-card {
+  padding: 24px 28px;
+  border: 1px solid #ecc9d0;
+  border-radius: 20px;
+  background: linear-gradient(135deg, #fffdfa 0%, #fff4f6 100%);
+  box-shadow: 0 8px 24px #c83e5510;
+}
+
+.organize-intro-card h2 {
+  margin: 0 0 6px;
+  font-family: "Playfair Display", Georgia, serif;
+  font-size: 24px;
+  color: var(--cocoa);
+}
+
+.organize-intro-card p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.safety-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.safety-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid #ebd0d5;
+  background: #ffffff;
+  color: var(--cocoa);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.safety-pill svg {
+  color: var(--cherry);
+}
+
+.organize-config-card {
+  margin-top: 20px;
+  padding: 20px 24px;
+  border-radius: 16px;
+  background: #fffdfa;
+  border: 1px solid var(--border);
+}
+
+.organize-config-title {
+  margin: 0 0 12px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--cocoa);
+}
+
+.organize-target-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.organize-target-input {
+  flex: 1;
+  min-width: 260px;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #ffffff;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  color: var(--cocoa);
+}
+
+.preview-stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.stat-card {
+  padding: 14px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #fffdf9;
+  text-align: center;
+}
+
+.stat-number {
+  font-family: "Playfair Display", Georgia, serif;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--cocoa);
+}
+
+.stat-card.warn .stat-number {
+  color: #b78103;
+}
+
+.stat-card.blocked .stat-number {
+  color: #c83e55;
+}
+
+.stat-label {
+  margin-top: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.preview-table-wrapper {
+  margin-top: 18px;
+  border-radius: 16px;
+  background: #fffdfa;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  box-shadow: 0 4px 16px #4a293006;
+}
+
+.preview-table-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  background: var(--cream-deep);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--cocoa);
+}
+
+.preview-list {
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.preview-item {
+  display: grid;
+  grid-template-columns: 28px 1fr 24px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 18px;
+  border-bottom: 1px solid #f6ebe8;
+  transition: background 0.12s ease;
+}
+
+.preview-item:last-child {
+  border-bottom: none;
+}
+
+.preview-item:hover {
+  background: #fff8f6;
+}
+
+.preview-item.blocked {
+  background: #fbf5f5;
+  opacity: 0.75;
+}
+
+.preview-item.has-collision {
+  background: #fffbf2;
+}
+
+.source-path-box,
+.target-path-box {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.source-path-box span,
+.target-path-box span {
+  display: block;
+  font-family: Consolas, monospace;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-path-box span {
+  color: #8c7275;
+}
+
+.target-path-box span {
+  color: var(--cherry-dark);
+  font-weight: 600;
+}
+
+.path-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+  font-family: "DM Sans", sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--cocoa);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge-collision {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #fff3cd;
+  border: 1px solid #ffeeba;
+  color: #856404;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.badge-cross-drive {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #fff8e1;
+  border: 1px solid #ffe082;
+  color: #b78103;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.badge-blocked {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #f8d7da;
+  border: 1px solid #f5c6cb;
+  color: #721c24;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.collision-select {
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  font-size: 10px;
+  color: var(--cocoa);
+}
+
+.organize-bottom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--cream-deep);
+  border-top: 1px solid var(--border);
+}
+
+.confirm-callout {
+  margin: 14px 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: #fff2f4;
+  border: 1px solid #f7cad2;
+  color: #702633;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--cocoa);
+  cursor: pointer;
+  margin-top: 12px;
+  user-select: none;
+}
+
+.rollback-history-card {
+  margin-top: 28px;
+  padding: 20px 24px;
+  border-radius: 16px;
+  background: #fffdfa;
+  border: 1px solid var(--border);
+}
+
+.rollback-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  margin-top: 8px;
+  border-radius: 10px;
+  background: var(--cream-deep);
+  border: 1px solid var(--border);
+}
+
+.rollback-item-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--cocoa);
+}
+
+.rollback-batch-tag {
+  font-family: Consolas, monospace;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+
 
 
 @media (prefers-reduced-motion: reduce) {

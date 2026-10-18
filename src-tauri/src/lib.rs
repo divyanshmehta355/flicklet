@@ -1,5 +1,6 @@
 mod db;
 mod gemini;
+mod organizer;
 mod scanner;
 
 use db::{CatalogItem, DbState};
@@ -323,6 +324,50 @@ fn play_in_vlc(file_path: String, start_time_seconds: Option<u64>) -> Result<(),
     Ok(())
 }
 
+#[tauri::command]
+fn preview_organize(
+    target_root: String,
+    item_ids: Option<Vec<String>>,
+    db_state: State<'_, DbState>,
+) -> Result<organizer::OrganizePreviewReport, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    let all_items = db::get_all_catalog_items(&conn).map_err(|e| e.to_string())?;
+
+    let items_to_preview: Vec<CatalogItem> = match item_ids {
+        Some(ids) => all_items.into_iter().filter(|i| ids.contains(&i.id)).collect(),
+        None => all_items,
+    };
+
+    Ok(organizer::generate_organize_preview(&target_root, &items_to_preview))
+}
+
+#[tauri::command]
+fn execute_organize(
+    plan: Vec<organizer::OrganizePlanItem>,
+    double_confirmed: bool,
+    db_state: State<'_, DbState>,
+) -> Result<organizer::OrganizeExecutionResult, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    organizer::execute_organize_plan(&conn, &plan, double_confirmed)
+}
+
+#[tauri::command]
+fn rollback_organize(
+    batch_id: String,
+    db_state: State<'_, DbState>,
+) -> Result<usize, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    organizer::rollback_organization_batch(&conn, &batch_id)
+}
+
+#[tauri::command]
+fn get_rollback_history(
+    db_state: State<'_, DbState>,
+) -> Result<Vec<db::RollbackBatchSummary>, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::get_recent_rollback_batches(&conn).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -354,8 +399,13 @@ pub fn run() {
             save_classified_metadata,
             ask_scene_assistant,
             check_vlc_installed,
-            play_in_vlc
+            play_in_vlc,
+            preview_organize,
+            execute_organize,
+            rollback_organize,
+            get_rollback_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
