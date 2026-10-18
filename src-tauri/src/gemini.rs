@@ -247,3 +247,111 @@ pub async fn test_gemini_key(api_key: &str) -> Result<String, String> {
         ))
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneSearchResult {
+    pub catalog_item_id: Option<String>,
+    pub matched_title: String,
+    pub scene_summary: String,
+    pub estimated_timestamp_seconds: Option<u64>,
+    pub timestamp_formatted: Option<String>,
+    pub is_estimate: bool,
+    pub confidence: String,
+    pub explanation: String,
+}
+
+pub async fn search_scene(
+    api_key: &str,
+    question: &str,
+    catalog_summary_json: &str,
+) -> Result<SceneSearchResult, String> {
+    if api_key.trim().is_empty() {
+        return Err(
+            "Gemini API key is not configured. Please add GEMINI_API_KEY to your .env file or Settings.".to_string(),
+        );
+    }
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={}",
+        api_key.trim()
+    );
+
+    let prompt = format!(
+        r#"You are Flicklet's cozy cinema assistant.
+A user has asked a question about their personal movie and TV collection:
+"{question}"
+
+Here is the user's catalog of available titles:
+{catalog_summary_json}
+
+Instructions:
+1. Identify which title in the catalog is being asked about or best matches the question/mood.
+2. If the user is asking about a specific scene or plot event:
+   - Provide a vivid, concise summary of the scene.
+   - Provide an ESTIMATED timestamp in seconds and HH:MM:SS format where that scene typically occurs.
+   - Note: Because you are working from film text and knowledge rather than inspecting the video stream, ALWAYS set is_estimate: true.
+   - In explanation, state clearly why this is an estimate and note that home video editions, distributor intros, and frame rates may shift the timestamp slightly.
+3. If the user is asking for a recommendation (e.g. "what should I watch tonight" or "something spooky"):
+   - Match the best title from the catalog.
+   - Explain why in a cozy, cinema-loving tone.
+   - Leave estimated_timestamp_seconds and timestamp_formatted as null.
+
+Respond ONLY with a JSON object adhering to this schema:
+{{
+  "catalog_item_id": "matched item ID from the catalog, or null",
+  "matched_title": "Title Name",
+  "scene_summary": "Scene description or recommendation summary",
+  "estimated_timestamp_seconds": 3600,
+  "timestamp_formatted": "01:00:00",
+  "is_estimate": true,
+  "confidence": "high" | "medium" | "low",
+  "explanation": "Context and honest estimate note"
+}}"#
+    );
+
+    let req_body = GeminiRequest {
+        contents: vec![GeminiContent {
+            parts: vec![GeminiPart { text: prompt }],
+        }],
+        generation_config: GenerationConfig {
+            response_mime_type: "application/json".to_string(),
+        },
+    };
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&req_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to query Gemini assistant: {}", e))?;
+
+    let status = res.status();
+    let text = res
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Gemini response: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!("Gemini API error (HTTP {}): {}", status, text));
+    }
+
+    let parsed: GeminiResponse = serde_json::from_str(&text)
+        .map_err(|e| format!("Failed to parse Gemini response: {}", e))?;
+
+    let raw_json_text = parsed
+        .candidates
+        .as_ref()
+        .and_then(|c| c.first())
+        .and_then(|cand| cand.content.as_ref())
+        .and_then(|cont| cont.parts.as_ref())
+        .and_then(|parts| parts.first())
+        .and_then(|p| p.text.as_ref())
+        .ok_or_else(|| "Gemini returned empty assistant response.".to_string())?;
+
+    let result: SceneSearchResult = serde_json::from_str(raw_json_text)
+        .map_err(|e| format!("Assistant response failed schema validation: {}. Raw: {}", e, raw_json_text))?;
+
+    Ok(result)
+}

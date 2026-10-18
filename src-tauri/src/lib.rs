@@ -232,6 +232,97 @@ fn save_classified_metadata(
         .ok_or_else(|| "Updated item not found".to_string())
 }
 
+#[tauri::command]
+async fn ask_scene_assistant(
+    question: String,
+    db_state: State<'_, DbState>,
+) -> Result<gemini::SceneSearchResult, String> {
+    let (catalog_summary, api_key) = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let items = db::get_all_catalog_items(&conn).map_err(|e| e.to_string())?;
+        let key = resolve_gemini_api_key(&conn)
+            .map(|(k, _)| k)
+            .ok_or_else(|| {
+                "Gemini API key is not configured. Add GEMINI_API_KEY to your .env file or enter it in Settings.".to_string()
+            })?;
+
+        let summary: Vec<serde_json::Value> = items
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "id": item.id,
+                    "title": item.display_title,
+                    "year": item.release_year,
+                    "genre": item.primary_genre,
+                    "media_type": item.media_type,
+                    "filename": item.filename,
+                })
+            })
+            .collect();
+
+        (serde_json::to_string(&summary).unwrap_or_default(), key)
+    };
+
+    gemini::search_scene(&api_key, &question, &catalog_summary).await
+}
+
+pub fn find_vlc_executable() -> Option<PathBuf> {
+    let standard_paths = [
+        r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+        r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+    ];
+
+    for p in &standard_paths {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("where.exe").arg("vlc.exe").output() {
+        if output.status.success() {
+            if let Ok(s) = String::from_utf8(output.stdout) {
+                if let Some(first_line) = s.lines().next() {
+                    let path = PathBuf::from(first_line.trim());
+                    if path.exists() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[tauri::command]
+fn check_vlc_installed() -> bool {
+    find_vlc_executable().is_some()
+}
+
+#[tauri::command]
+fn play_in_vlc(file_path: String, start_time_seconds: Option<u64>) -> Result<(), String> {
+    let file = PathBuf::from(&file_path);
+    if !file.exists() {
+        return Err(format!("File does not exist: {}", file_path));
+    }
+
+    let vlc = find_vlc_executable().ok_or_else(|| {
+        "VLC is not installed at standard paths. You can install it from https://videolan.org or open with your default player.".to_string()
+    })?;
+
+    let mut cmd = std::process::Command::new(vlc);
+    if let Some(sec) = start_time_seconds {
+        cmd.arg(format!("--start-time={}", sec));
+    }
+    cmd.arg(&file_path);
+
+    cmd.spawn()
+        .map_err(|e| format!("Failed to launch VLC: {}", e))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -260,7 +351,10 @@ pub fn run() {
             get_gemini_api_key_status,
             test_gemini_connection,
             classify_media_item,
-            save_classified_metadata
+            save_classified_metadata,
+            ask_scene_assistant,
+            check_vlc_installed,
+            play_in_vlc
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

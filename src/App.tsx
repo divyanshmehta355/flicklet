@@ -12,6 +12,7 @@ import {
   Heart,
   Key,
   Loader2,
+  Play,
   RefreshCw,
   Search,
   Settings,
@@ -21,6 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -64,6 +66,17 @@ interface AiClassificationSuggestion {
   season_number: number | null;
   episode_number: number | null;
   confidence: string;
+}
+
+interface SceneSearchResult {
+  catalog_item_id: string | null;
+  matched_title: string;
+  scene_summary: string;
+  estimated_timestamp_seconds: number | null;
+  timestamp_formatted: string | null;
+  is_estimate: boolean;
+  confidence: string;
+  explanation: string;
 }
 
 interface ApiKeyStatus {
@@ -178,7 +191,14 @@ function App() {
   } | null>(null);
   const [isSavingMetadata, setIsSavingMetadata] = useState(false);
 
-  // Load existing persistent catalog and API key status on launch
+  // Cinema assistant and timestamp playback state
+  const [isAskingAssistant, setIsAskingAssistant] = useState(false);
+  const [assistantResult, setAssistantResult] = useState<SceneSearchResult | null>(null);
+  const [adjustedTimestamp, setAdjustedTimestamp] = useState<number | null>(null);
+  const [isVlcAvailable, setIsVlcAvailable] = useState<boolean>(false);
+  const [playbackMessage, setPlaybackMessage] = useState<string | null>(null);
+
+  // Load existing persistent catalog, API key status, and check VLC on launch
   useEffect(() => {
     async function initApp() {
       try {
@@ -195,6 +215,13 @@ function App() {
         setApiKeyStatus(status);
       } catch (err) {
         console.error("Could not check Gemini API key status:", err);
+      }
+
+      try {
+        const vlcInstalled = await invoke<boolean>("check_vlc_installed");
+        setIsVlcAvailable(vlcInstalled);
+      } catch (err) {
+        console.error("Could not check VLC status:", err);
       }
     }
     initApp();
@@ -390,14 +417,108 @@ function App() {
 
   const hasCatalog = catalogItems.length > 0;
 
-  function askFlicklet(event: FormEvent<HTMLFormElement>) {
+  function formatSeconds(totalSec: number): string {
+    const clamped = Math.max(0, Math.floor(totalSec));
+    const h = Math.floor(clamped / 3600);
+    const m = Math.floor((clamped % 3600) / 60);
+    const s = clamped % 60;
+    return `${h.toString().padStart(2, "0")}:${m
+      .toString()
+      .padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }
+
+  function handleNudge(deltaSeconds: number) {
+    setAdjustedTimestamp((prev) => {
+      const current = prev ?? 0;
+      return Math.max(0, current + deltaSeconds);
+    });
+  }
+
+  async function handlePlayInVlc(filePath: string, seconds: number | null) {
+    setPlaybackMessage(null);
+    try {
+      await invoke("play_in_vlc", {
+        filePath,
+        startTimeSeconds: seconds !== null && seconds > 0 ? seconds : null,
+      });
+    } catch (err) {
+      setPlaybackMessage(
+        `VLC launch error: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  async function handleOpenDefaultPlayer(filePath: string) {
+    setPlaybackMessage(null);
+    try {
+      await openPath(filePath);
+    } catch (err) {
+      setPlaybackMessage(
+        `Player error: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  async function handleRevealInExplorer(filePath: string) {
+    setPlaybackMessage(null);
+    try {
+      await revealItemInDir(filePath);
+    } catch (err) {
+      setPlaybackMessage(
+        `Explorer error: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  async function askFlicklet(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!question.trim()) return;
 
-    window.alert(
-      `Your future Flicklet AI question:\n\n${question}\n\nWe'll connect Scene Search in a subsequent milestone.`,
-    );
+    setIsAskingAssistant(true);
+    setAssistantResult(null);
+    setPlaybackMessage(null);
+
+    try {
+      const result = await invoke<SceneSearchResult>("ask_scene_assistant", {
+        question: question.trim(),
+      });
+      setAssistantResult(result);
+      setAdjustedTimestamp(result.estimated_timestamp_seconds ?? null);
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      if (errMsg.toLowerCase().includes("not configured")) {
+        setActiveNav("Settings");
+        setSettingsMessage({
+          type: "info",
+          text: "Please add your GEMINI_API_KEY to your .env file or enter it in Settings to use the scene assistant.",
+        });
+      } else {
+        window.alert(`Flicklet Assistant:\n\n${errMsg}`);
+      }
+    } finally {
+      setIsAskingAssistant(false);
+    }
   }
+
+  const matchedCatalogItem = assistantResult
+    ? catalogItems.find((item) => {
+        if (
+          assistantResult.catalog_item_id &&
+          item.id === assistantResult.catalog_item_id
+        ) {
+          return true;
+        }
+        const titleA = item.display_title.toLowerCase().trim();
+        const titleB = assistantResult.matched_title.toLowerCase().trim();
+        if (titleA === titleB) return true;
+        if (titleA.length > 3 && titleB.length > 3) {
+          if (titleA.includes(titleB) || titleB.includes(titleA)) return true;
+        }
+        const fileA = item.filename.toLowerCase();
+        if (titleB.length > 3 && fileA.includes(titleB)) return true;
+        return false;
+      })
+    : null;
 
   return (
     <div className="app-shell">
@@ -592,20 +713,271 @@ function App() {
             </section>
 
             <form className="ai-search" onSubmit={askFlicklet}>
-              <div className="ai-icon"><WandSparkles size={21} /></div>
+              <div className="ai-icon">
+                {isAskingAssistant ? (
+                  <Loader2 size={21} className="spin-icon" />
+                ) : (
+                  <WandSparkles size={21} />
+                )}
+              </div>
               <div className="ai-search-content">
                 <label htmlFor="ai-question">ASK YOUR LITTLE MOVIE ASSISTANT</label>
                 <input
                   id="ai-question"
                   value={question}
                   onChange={(event) => setQuestion(event.target.value)}
-                  placeholder="Find something spooky, cozy, or unforgettable..."
+                  placeholder="e.g. When does the spinning top stop in Inception? Or find something cozy..."
+                  disabled={isAskingAssistant}
                 />
               </div>
-              <button className="ask-button" type="submit">
-                Ask Flicklet <span>↗</span>
+              <button
+                className="ask-button"
+                type="submit"
+                disabled={isAskingAssistant || !question.trim()}
+              >
+                {isAskingAssistant ? (
+                  <>
+                    <span>Thinking...</span>
+                    <Loader2 size={13} className="spin-icon" />
+                  </>
+                ) : (
+                  <>
+                    <span>Ask Flicklet</span>
+                    <span>↗</span>
+                  </>
+                )}
               </button>
             </form>
+
+            {/* Assistant Loading State */}
+            {isAskingAssistant && (
+              <div className="assistant-result-card">
+                <div className="assistant-header">
+                  <div className="assistant-title-group">
+                    <div className="assistant-sparkle-icon">
+                      <Loader2 className="spin-icon" size={18} />
+                    </div>
+                    <h4>Consulting Flicklet cinema memory...</h4>
+                  </div>
+                </div>
+                <p className="assistant-summary" style={{ margin: 0 }}>
+                  Analyzing scene moments and estimating timestamps for &ldquo;{question}&rdquo;...
+                </p>
+              </div>
+            )}
+
+            {/* Assistant Result Card */}
+            {assistantResult && (
+              <div className="assistant-result-card">
+                <div className="assistant-header">
+                  <div className="assistant-title-group">
+                    <div className="assistant-sparkle-icon">
+                      <Sparkles size={18} />
+                    </div>
+                    <h4>{assistantResult.matched_title}</h4>
+                    {matchedCatalogItem ? (
+                      <span className="assistant-matched-badge">
+                        In your library
+                      </span>
+                    ) : (
+                      <span className="assistant-matched-badge">
+                        Cinema Knowledge
+                      </span>
+                    )}
+                    <span
+                      className={`confidence-pill confidence-${assistantResult.confidence.toLowerCase()}`}
+                    >
+                      {assistantResult.confidence} confidence
+                    </span>
+                  </div>
+                  <button
+                    className="btn-icon-close"
+                    onClick={() => {
+                      setAssistantResult(null);
+                      setPlaybackMessage(null);
+                    }}
+                    title="Dismiss"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+
+                <p className="assistant-summary">
+                  {assistantResult.scene_summary}
+                </p>
+
+                {adjustedTimestamp !== null && (
+                  <div className="timestamp-box">
+                    <div className="timestamp-bar">
+                      <div className="timestamp-display">
+                        <div className="timestamp-pill">
+                          <span>⏱️</span>
+                          <span>~{formatSeconds(adjustedTimestamp)}</span>
+                          {assistantResult.is_estimate && (
+                            <span className="estimated-tag">Estimated</span>
+                          )}
+                        </div>
+
+                        <div className="timestamp-nudges">
+                          <button
+                            type="button"
+                            className="btn-nudge"
+                            onClick={() => handleNudge(-60)}
+                            title="Jump back 60 seconds"
+                          >
+                            -60s
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-nudge"
+                            onClick={() => handleNudge(-15)}
+                            title="Jump back 15 seconds"
+                          >
+                            -15s
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-nudge"
+                            onClick={() => handleNudge(15)}
+                            title="Jump forward 15 seconds"
+                          >
+                            +15s
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-nudge"
+                            onClick={() => handleNudge(60)}
+                            title="Jump forward 60 seconds"
+                          >
+                            +60s
+                          </button>
+                        </div>
+                      </div>
+
+                      {matchedCatalogItem && (
+                        <div className="timestamp-actions">
+                          {isVlcAvailable ? (
+                            <button
+                              type="button"
+                              className="btn-play-vlc"
+                              onClick={() =>
+                                handlePlayInVlc(
+                                  matchedCatalogItem.path,
+                                  adjustedTimestamp
+                                )
+                              }
+                            >
+                              <Play size={13} fill="currentColor" />
+                              <span>
+                                Play in VLC at {formatSeconds(adjustedTimestamp)}
+                              </span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn-play-vlc"
+                              onClick={() =>
+                                handleOpenDefaultPlayer(matchedCatalogItem.path)
+                              }
+                              title="Play with system default player"
+                            >
+                              <Play size={13} fill="currentColor" />
+                              <span>Play in Default Player</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            className="btn-play-default"
+                            onClick={() =>
+                              handleOpenDefaultPlayer(matchedCatalogItem.path)
+                            }
+                            title="Play with system default player"
+                          >
+                            <span>Default Player</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            className="btn-play-default"
+                            onClick={() =>
+                              handleRevealInExplorer(matchedCatalogItem.path)
+                            }
+                            title="Show in Windows Explorer"
+                          >
+                            <span>Show in Folder</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    <p className="timestamp-explanation">
+                      💡 {assistantResult.explanation ||
+                        "Estimated based on standard release. Intros, edition differences, or logos may shift this timestamp slightly."}
+                    </p>
+
+                    {!isVlcAvailable && matchedCatalogItem && (
+                      <p className="vlc-notice">
+                        ℹ️ <strong>Tip:</strong> Install{" "}
+                        <a
+                          href="https://www.videolan.org/vlc/"
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            openUrl("https://www.videolan.org/vlc/");
+                          }}
+                        >
+                          VLC Media Player
+                        </a>{" "}
+                        to jump directly to estimated timestamps.
+                      </p>
+                    )}
+
+                    {!matchedCatalogItem && (
+                      <p className="not-in-library-notice">
+                        📁 This title is not in your currently scanned folder. You can add the folder where it lives to enable 1-click playback.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {adjustedTimestamp === null && matchedCatalogItem && (
+                  <div className="timestamp-box" style={{ marginTop: 12 }}>
+                    <div className="timestamp-actions">
+                      <button
+                        type="button"
+                        className="btn-play-vlc"
+                        onClick={() =>
+                          isVlcAvailable
+                            ? handlePlayInVlc(matchedCatalogItem.path, null)
+                            : handleOpenDefaultPlayer(matchedCatalogItem.path)
+                        }
+                      >
+                        <Play size={13} fill="currentColor" />
+                        <span>Play {matchedCatalogItem.display_title}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-play-default"
+                        onClick={() =>
+                          handleRevealInExplorer(matchedCatalogItem.path)
+                        }
+                      >
+                        <span>Show in Folder</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {playbackMessage && (
+                  <div className="scan-error-banner" style={{ marginTop: 12 }}>
+                    <AlertCircle size={15} />
+                    <span>{playbackMessage}</span>
+                  </div>
+                )}
+              </div>
+            )}
 
             <section className="library-section">
               <div className="section-heading">
@@ -808,12 +1180,30 @@ function App() {
                           </div>
 
                           <div className="card-actions">
-                            <span className="genre-chip">
-                              {item.primary_genre ||
-                                (item.media_type === "series"
-                                  ? "Series"
-                                  : "Local File")}
-                            </span>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <button
+                                type="button"
+                                className="btn-card-play"
+                                onClick={() =>
+                                  isVlcAvailable
+                                    ? handlePlayInVlc(item.path, null)
+                                    : handleOpenDefaultPlayer(item.path)
+                                }
+                                title={
+                                  isVlcAvailable
+                                    ? "Play in VLC"
+                                    : "Play with Default Player"
+                                }
+                              >
+                                <Play size={11} fill="currentColor" />
+                              </button>
+                              <span className="genre-chip" style={{ marginTop: 0 }}>
+                                {item.primary_genre ||
+                                  (item.media_type === "series"
+                                    ? "Series"
+                                    : "Local File")}
+                              </span>
+                            </div>
 
                             {item.ai_status === "approved" ? (
                               <span
