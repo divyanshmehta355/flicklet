@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, useEffect, type FormEvent } from "react";
 import {
   AlertCircle,
   Clapperboard,
@@ -28,18 +28,25 @@ type MediaItem = {
   symbol: string;
 };
 
-interface DiscoveredVideo {
-  name: string;
+interface CatalogItem {
+  id: string;
   path: string;
+  filename: string;
   extension: string;
   size_bytes: number;
-  modified_timestamp: number | null;
-}
-
-interface ScanResult {
-  root_folder: string;
-  total_count: number;
-  videos: DiscoveredVideo[];
+  last_modified: number | null;
+  media_type: string;
+  display_title: string;
+  release_year: number | null;
+  primary_genre: string | null;
+  secondary_genres: string[];
+  series_title: string | null;
+  season_number: number | null;
+  episode_number: number | null;
+  is_favorite: boolean;
+  ai_status: string;
+  is_missing: boolean;
+  last_scan_time: number;
 }
 
 function formatBytes(bytes: number): string {
@@ -50,7 +57,7 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
-const media: MediaItem[] = [
+const sampleMedia: MediaItem[] = [
   {
     title: "The Conjuring",
     year: 2013,
@@ -98,9 +105,9 @@ function App() {
   const [genre, setGenre] = useState("All");
   const [question, setQuestion] = useState("");
 
-  // Local media library state
+  // Persistent SQLite catalog state
+  const [catalogItems, setCatalogItems] = useState<CatalogItem[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
-  const [discoveredVideos, setDiscoveredVideos] = useState<DiscoveredVideo[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
 
@@ -112,7 +119,22 @@ function App() {
     "Mystery",
   ];
 
-  // Pick a local media folder through the native Windows folder picker
+  // Load existing persistent catalog from SQLite upon application launch
+  useEffect(() => {
+    async function loadCatalog() {
+      try {
+        const items = await invoke<CatalogItem[]>("get_catalog");
+        if (items && items.length > 0) {
+          setCatalogItems(items);
+        }
+      } catch (err) {
+        console.error("Could not load existing SQLite catalog:", err);
+      }
+    }
+    loadCatalog();
+  }, []);
+
+  // Native Windows folder picker -> Rust scan & SQLite upsert
   async function handleChooseFolder() {
     setScanError(null);
     try {
@@ -123,19 +145,18 @@ function App() {
       });
 
       if (!selected) {
-        // User cancelled selection
-        return;
+        return; // User cancelled
       }
 
       const folderPath = typeof selected === "string" ? selected : selected[0];
       setSelectedFolder(folderPath);
       setIsScanning(true);
 
-      const result = await invoke<ScanResult>("scan_folder", {
+      const items = await invoke<CatalogItem[]>("scan_folder", {
         folderPath,
       });
 
-      setDiscoveredVideos(result.videos);
+      setCatalogItems(items);
     } catch (error) {
       console.error("Folder scan failed:", error);
       setScanError(error instanceof Error ? error.message : String(error));
@@ -144,16 +165,16 @@ function App() {
     }
   }
 
-  // Rescan the active folder without reopening the picker
+  // Rescan active folder
   async function handleRescan() {
     if (!selectedFolder) return;
     setScanError(null);
     setIsScanning(true);
     try {
-      const result = await invoke<ScanResult>("scan_folder", {
+      const items = await invoke<CatalogItem[]>("scan_folder", {
         folderPath: selectedFolder,
       });
-      setDiscoveredVideos(result.videos);
+      setCatalogItems(items);
     } catch (error) {
       console.error("Rescan failed:", error);
       setScanError(error instanceof Error ? error.message : String(error));
@@ -162,27 +183,55 @@ function App() {
     }
   }
 
-  // Filter sample preview items (when no local folder has been scanned yet)
-  const filteredSampleMedia = media.filter((item) => {
+  // Toggle favorite status persisted into SQLite
+  async function handleToggleFavorite(id: string) {
+    try {
+      const newFav = await invoke<boolean>("toggle_favorite", { id });
+      setCatalogItems((prev) =>
+        prev.map((item) =>
+          item.id === id ? { ...item, is_favorite: newFav } : item
+        )
+      );
+    } catch (error) {
+      console.error("Failed to toggle favorite:", error);
+    }
+  }
+
+  // Filter catalog based on active navigation and search query
+  const filteredCatalog = catalogItems.filter((item) => {
+    const matchesSearch =
+      item.display_title.toLowerCase().includes(query.toLowerCase()) ||
+      item.filename.toLowerCase().includes(query.toLowerCase());
+
+    const matchesNav =
+      activeNav === "Home" ||
+      (activeNav === "All movies" && item.media_type !== "series") ||
+      (activeNav === "TV shows" && item.media_type === "series") ||
+      (activeNav === "Collections" && item.is_favorite);
+
+    const matchesGenre =
+      genre === "All" ||
+      item.primary_genre === genre ||
+      item.secondary_genres.includes(genre);
+
+    return matchesSearch && matchesNav && matchesGenre;
+  });
+
+  // Filter sample preview items (when no local media has ever been scanned)
+  const filteredSampleMedia = sampleMedia.filter((item) => {
     const matchesSearch = item.title
       .toLowerCase()
       .includes(query.toLowerCase());
-
     const matchesGenre = genre === "All" || item.genre === genre;
     const matchesNav =
-      activeNav !== "All movies" ||
-      item.kind === "Movie";
-    const matchesSeries =
-      activeNav !== "TV shows" ||
-      item.kind === "Series";
+      activeNav === "Home" ||
+      (activeNav === "All movies" && item.kind === "Movie") ||
+      (activeNav === "TV shows" && item.kind === "Series");
 
-    return matchesSearch && matchesGenre && matchesNav && matchesSeries;
+    return matchesSearch && matchesGenre && matchesNav;
   });
 
-  // Filter real discovered video files by search query
-  const filteredDiscoveredVideos = discoveredVideos.filter((video) =>
-    video.name.toLowerCase().includes(query.toLowerCase())
-  );
+  const hasCatalog = catalogItems.length > 0;
 
   function askFlicklet(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -294,14 +343,14 @@ function App() {
             <span className="item-count">
               {isScanning
                 ? "Scanning..."
-                : selectedFolder
-                ? `${filteredDiscoveredVideos.length} titles`
+                : hasCatalog
+                ? `${filteredCatalog.length} titles`
                 : `${filteredSampleMedia.length} titles (preview)`}{" "}
               <Heart size={13} />
             </span>
           </div>
 
-          {/* Local Folder Scanner Control Panel */}
+          {/* Local Folder Scanner & SQLite Sync Banner */}
           <div className="folder-panel">
             <div className="folder-panel-info">
               <div className="folder-panel-icon">
@@ -311,14 +360,18 @@ function App() {
                 <h3 className="folder-panel-title">
                   {selectedFolder
                     ? "Active Media Folder"
+                    : hasCatalog
+                    ? "Local SQLite Media Library"
                     : "Connect your local cinema library"}
                 </h3>
                 <p
                   className="folder-panel-path"
-                  title={selectedFolder || undefined}
+                  title={selectedFolder || (hasCatalog ? `${catalogItems.length} items cataloged in SQLite` : undefined)}
                 >
                   {selectedFolder
                     ? selectedFolder
+                    : hasCatalog
+                    ? `${catalogItems.length} video files persisted in your local library`
                     : "Choose a folder on your PC. Flicklet scans video files safely in read-only mode."}
                 </p>
               </div>
@@ -351,7 +404,7 @@ function App() {
                 ) : (
                   <>
                     <FolderOpen size={14} />
-                    <span>{selectedFolder ? "Change Folder" : "Choose Folder"}</span>
+                    <span>{hasCatalog || selectedFolder ? "Scan Folder" : "Choose Folder"}</span>
                   </>
                 )}
               </button>
@@ -372,15 +425,15 @@ function App() {
               <input
                 aria-label="Search titles"
                 placeholder={
-                  selectedFolder
-                    ? "Search discovered video files..."
+                  hasCatalog
+                    ? "Search your persistent collection..."
                     : "Find a title..."
                 }
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
               />
             </div>
-            {!selectedFolder && (
+            {!hasCatalog && (
               <label className="genre-select">
                 <span>Genre</span>
                 <select
@@ -397,17 +450,17 @@ function App() {
             )}
           </div>
 
-          {/* Media Grid: Real Discovered Videos vs Initial Preview */}
-          {selectedFolder ? (
+          {/* Media Grid: Real Persistent Catalog vs Initial Sample */}
+          {hasCatalog ? (
             isScanning ? (
               <div className="empty-state">
                 <Loader2 className="spin-icon" size={32} />
-                <h3>Scanning your collection...</h3>
-                <p>Inspecting video files in {selectedFolder}</p>
+                <h3>Scanning and syncing library...</h3>
+                <p>Updating SQLite catalog with discovered media files</p>
               </div>
-            ) : filteredDiscoveredVideos.length > 0 ? (
+            ) : filteredCatalog.length > 0 ? (
               <div className="movie-grid">
-                {filteredDiscoveredVideos.map((item, idx) => {
+                {filteredCatalog.map((item, idx) => {
                   const tones = [
                     "poster-romance",
                     "poster-mystery",
@@ -419,12 +472,12 @@ function App() {
                   const symbol = symbols[idx % symbols.length];
 
                   return (
-                    <article className="movie-card" key={item.path}>
+                    <article className="movie-card" key={item.id}>
                       <div className={`poster ${tone}`} title={item.path}>
                         <span className="poster-symbol">{symbol}</span>
-                        <span className="poster-title">{item.name}</span>
+                        <span className="poster-title">{item.display_title}</span>
                         <span className="poster-year">
-                          {formatBytes(item.size_bytes)}
+                          {item.release_year ? item.release_year : formatBytes(item.size_bytes)}
                         </span>
                         <span className="poster-type">
                           {item.extension.toUpperCase()}
@@ -433,14 +486,14 @@ function App() {
                       <div className="movie-info">
                         <div style={{ minWidth: 0, overflow: "hidden" }}>
                           <h3
-                            title={item.name}
+                            title={item.display_title}
                             style={{
                               overflow: "hidden",
                               textOverflow: "ellipsis",
                               whiteSpace: "nowrap",
                             }}
                           >
-                            {item.name}
+                            {item.display_title}
                           </h3>
                           <p>
                             {formatBytes(item.size_bytes)}{" "}
@@ -452,18 +505,23 @@ function App() {
                           >
                             {item.path}
                           </div>
+                          {item.is_missing && (
+                            <div className="badge-missing" title="File was not found at this location during the last scan">
+                              ⚠️ File missing on disk
+                            </div>
+                          )}
                         </div>
                         <button
-                          className="favorite-button"
-                          aria-label={`Favorite ${item.name}`}
-                          onClick={(event) => {
-                            event.currentTarget.classList.toggle("favorited");
-                          }}
+                          className={`favorite-button ${item.is_favorite ? "favorited" : ""}`}
+                          aria-label={`Favorite ${item.display_title}`}
+                          onClick={() => handleToggleFavorite(item.id)}
                         >
                           <Heart size={17} />
                         </button>
                       </div>
-                      <span className="genre-chip">Local Video</span>
+                      <span className="genre-chip">
+                        {item.primary_genre || (item.media_type === "series" ? "Series" : "Movie")}
+                      </span>
                     </article>
                   );
                 })}
@@ -472,14 +530,14 @@ function App() {
               <div className="empty-state">
                 <Film size={32} />
                 <h3>
-                  {discoveredVideos.length === 0
-                    ? "No video files found"
-                    : "No matching videos"}
+                  {activeNav === "Collections"
+                    ? "No favorites yet"
+                    : "No matching titles"}
                 </h3>
                 <p>
-                  {discoveredVideos.length === 0
-                    ? `We searched recursively through ${selectedFolder}, but found no supported video formats (.mp4, .mkv, .avi, .mov, etc.).`
-                    : "Try searching with a different filename keyword."}
+                  {activeNav === "Collections"
+                    ? "Click the little heart icon on any title to add it to your cozy favorites."
+                    : "Try searching with a different keyword or selecting another tab."}
                 </p>
               </div>
             )

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 // Common video extensions supported by Flicklet
@@ -15,13 +15,6 @@ pub struct DiscoveredVideo {
     pub extension: String,
     pub size_bytes: u64,
     pub modified_timestamp: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScanResult {
-    pub root_folder: String,
-    pub total_count: usize,
-    pub videos: Vec<DiscoveredVideo>,
 }
 
 pub fn scan_directory_recursive(root: &Path) -> Result<Vec<DiscoveredVideo>, String> {
@@ -87,29 +80,4 @@ pub fn scan_directory_recursive(root: &Path) -> Result<Vec<DiscoveredVideo>, Str
     // Sort alphabetically by filename for consistent display
     results.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(results)
-}
-
-#[tauri::command]
-pub async fn scan_folder(folder_path: String) -> Result<ScanResult, String> {
-    let path = PathBuf::from(&folder_path);
-    if !path.exists() {
-        return Err(format!("Folder does not exist: {}", folder_path));
-    }
-    if !path.is_dir() {
-        return Err(format!("Selected path is not a directory: {}", folder_path));
-    }
-
-    let root_clone = path.clone();
-    let videos = tauri::async_runtime::spawn_blocking(move || {
-        scan_directory_recursive(&root_clone)
-    })
-    .await
-    .map_err(|e| format!("Scan task error: {}", e))??;
-
-    let total_count = videos.len();
-    Ok(ScanResult {
-        root_folder: folder_path,
-        total_count,
-        videos,
-    })
 }
