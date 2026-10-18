@@ -1,10 +1,79 @@
 mod db;
+mod gemini;
 mod scanner;
 
 use db::{CatalogItem, DbState};
+use gemini::AiClassificationSuggestion;
 use scanner::scan_directory_recursive;
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tauri::{Manager, State};
+
+#[derive(Serialize, Deserialize)]
+pub struct ApiKeyStatus {
+    pub has_key: bool,
+    pub source: String,
+    pub masked_key: String,
+}
+
+/// Resolves the Gemini API key from process environment variables, .env file, or SQLite settings table
+pub fn resolve_gemini_api_key(conn: &rusqlite::Connection) -> Option<(String, String)> {
+    // 1. Process environment variable (e.g. from launch shell or IDE)
+    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return Some((trimmed.to_string(), "Environment variable (GEMINI_API_KEY)".to_string()));
+        }
+    }
+
+    // 2. Check .env file in root, cwd ancestors, and parent directories
+    let mut candidates = vec![
+        PathBuf::from(".env"),
+        PathBuf::from("../.env"),
+        PathBuf::from("src-tauri/.env"),
+    ];
+
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            let p = ancestor.join(".env");
+            if !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+    }
+
+    for candidate in &candidates {
+        if let Ok(contents) = std::fs::read_to_string(candidate) {
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('#') || trimmed.is_empty() {
+                    continue;
+                }
+                if let Some((k, v)) = trimmed.split_once('=') {
+                    if k.trim() == "GEMINI_API_KEY" {
+                        let clean_val = v.trim().trim_matches(['"', '\'']);
+                        if !clean_val.is_empty() {
+                            return Some((
+                                clean_val.to_string(),
+                                format!(".env file ({})", candidate.display()),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fallback to local SQLite settings table
+    if let Ok(Some(db_key)) = db::get_setting(conn, "gemini_api_key") {
+        let trimmed = db_key.trim();
+        if !trimmed.is_empty() {
+            return Some((trimmed.to_string(), "Local database settings".to_string()));
+        }
+    }
+
+    None
+}
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -56,6 +125,113 @@ fn toggle_favorite(id: String, db_state: State<'_, DbState>) -> Result<bool, Str
     db::toggle_item_favorite(&conn, &id).map_err(|e| format!("Failed to update favorite: {}", e))
 }
 
+#[tauri::command]
+fn save_gemini_api_key(api_key: String, db_state: State<'_, DbState>) -> Result<(), String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::set_setting(&conn, "gemini_api_key", api_key.trim())
+        .map_err(|e| format!("Failed to save API key: {}", e))
+}
+
+#[tauri::command]
+fn get_gemini_api_key_status(db_state: State<'_, DbState>) -> Result<ApiKeyStatus, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    match resolve_gemini_api_key(&conn) {
+        Some((k, source)) => {
+            let masked = if k.len() > 8 {
+                format!("{}...{}", &k[..4], &k[k.len() - 4..])
+            } else {
+                "••••••••".to_string()
+            };
+            Ok(ApiKeyStatus {
+                has_key: true,
+                source,
+                masked_key: masked,
+            })
+        }
+        None => Ok(ApiKeyStatus {
+            has_key: false,
+            source: "none".to_string(),
+            masked_key: String::new(),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn test_gemini_connection(
+    api_key: Option<String>,
+    db_state: State<'_, DbState>,
+) -> Result<String, String> {
+    let key_to_test = match api_key {
+        Some(k) if !k.trim().is_empty() => k,
+        _ => {
+            let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+            resolve_gemini_api_key(&conn)
+                .map(|(k, _)| k)
+                .ok_or_else(|| {
+                    "No Gemini API key found in .env or settings. Please provide a key to test.".to_string()
+                })?
+        }
+    };
+
+    gemini::test_gemini_key(&key_to_test).await
+}
+
+#[tauri::command]
+async fn classify_media_item(
+    id: String,
+    db_state: State<'_, DbState>,
+) -> Result<AiClassificationSuggestion, String> {
+    let (item, api_key) = {
+        let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+        let item = db::get_catalog_item_by_id(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Item not found in catalog".to_string())?;
+        let key = resolve_gemini_api_key(&conn)
+            .map(|(k, _)| k)
+            .ok_or_else(|| {
+                "Gemini API key is not configured. Add GEMINI_API_KEY to your .env file or enter it in Settings.".to_string()
+            })?;
+        (item, key)
+    };
+
+    // Extract parent directory name for helpful context
+    let path = Path::new(&item.path);
+    let folder_context = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+
+    gemini::classify_media_text(&api_key, &item.filename, folder_context).await
+}
+
+#[tauri::command]
+fn save_classified_metadata(
+    id: String,
+    metadata: AiClassificationSuggestion,
+    db_state: State<'_, DbState>,
+) -> Result<CatalogItem, String> {
+    let conn = db_state.0.lock().map_err(|e| e.to_string())?;
+    db::update_catalog_metadata(
+        &conn,
+        &id,
+        &metadata.display_title,
+        metadata.release_year,
+        &metadata.media_type,
+        &metadata.primary_genre,
+        &metadata.secondary_genres,
+        metadata.series_title.as_deref(),
+        metadata.season_number,
+        metadata.episode_number,
+        "approved",
+    )
+    .map_err(|e| format!("Failed to save metadata: {}", e))?;
+
+    db::get_catalog_item_by_id(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Updated item not found".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -79,7 +255,12 @@ pub fn run() {
             greet,
             scan_folder,
             get_catalog,
-            toggle_favorite
+            toggle_favorite,
+            save_gemini_api_key,
+            get_gemini_api_key_status,
+            test_gemini_connection,
+            classify_media_item,
+            save_classified_metadata
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

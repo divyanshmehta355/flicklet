@@ -71,6 +71,14 @@ fn init_schema(conn: &Connection) -> SqlResult<()> {
     )?;
 
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_media_path ON media_catalog(path)",
         [],
     )?;
@@ -214,3 +222,113 @@ pub fn toggle_item_favorite(conn: &Connection, id: &str) -> SqlResult<bool> {
     let new_val: i64 = stmt.query_row(params![id], |row| row.get(0))?;
     Ok(new_val == 1)
 }
+
+pub fn get_setting(conn: &Connection, key: &str) -> SqlResult<Option<String>> {
+    let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+    let mut rows = stmt.query(params![key])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+pub fn get_catalog_item_by_id(conn: &Connection, id: &str) -> SqlResult<Option<CatalogItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, filename, extension, size_bytes, last_modified,
+                media_type, display_title, release_year, primary_genre,
+                secondary_genres, series_title, season_number, episode_number,
+                is_favorite, ai_status, is_missing, last_scan_time
+         FROM media_catalog
+         WHERE id = ?1",
+    )?;
+
+    let mut rows = stmt.query_map(params![id], |row| {
+        let sec_genres_raw: String = row.get(10)?;
+        let secondary_genres: Vec<String> =
+            serde_json::from_str(&sec_genres_raw).unwrap_or_default();
+
+        let size_raw: i64 = row.get(4)?;
+        let mod_raw: Option<i64> = row.get(5)?;
+        let scan_raw: i64 = row.get(17)?;
+
+        Ok(CatalogItem {
+            id: row.get(0)?,
+            path: row.get(1)?,
+            filename: row.get(2)?,
+            extension: row.get(3)?,
+            size_bytes: size_raw.max(0) as u64,
+            last_modified: mod_raw.map(|m| m.max(0) as u64),
+            media_type: row.get(6)?,
+            display_title: row.get(7)?,
+            release_year: row.get(8)?,
+            primary_genre: row.get(9)?,
+            secondary_genres,
+            series_title: row.get(11)?,
+            season_number: row.get(12)?,
+            episode_number: row.get(13)?,
+            is_favorite: row.get::<_, i64>(14)? == 1,
+            ai_status: row.get(15)?,
+            is_missing: row.get::<_, i64>(16)? == 1,
+            last_scan_time: scan_raw.max(0) as u64,
+        })
+    })?;
+
+    if let Some(item_res) = rows.next() {
+        Ok(Some(item_res?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn update_catalog_metadata(
+    conn: &Connection,
+    id: &str,
+    display_title: &str,
+    release_year: Option<u32>,
+    media_type: &str,
+    primary_genre: &str,
+    secondary_genres: &[String],
+    series_title: Option<&str>,
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
+    ai_status: &str,
+) -> SqlResult<()> {
+    let sec_json = serde_json::to_string(secondary_genres).unwrap_or_else(|_| "[]".to_string());
+    conn.execute(
+        "UPDATE media_catalog
+         SET display_title = ?1,
+             release_year = ?2,
+             media_type = ?3,
+             primary_genre = ?4,
+             secondary_genres = ?5,
+             series_title = ?6,
+             season_number = ?7,
+             episode_number = ?8,
+             ai_status = ?9
+         WHERE id = ?10",
+        params![
+            display_title,
+            release_year.map(|y| y as i64),
+            media_type,
+            primary_genre,
+            sec_json,
+            series_title,
+            season_number.map(|s| s as i64),
+            episode_number.map(|e| e as i64),
+            ai_status,
+            id,
+        ],
+    )?;
+    Ok(())
+}
+
