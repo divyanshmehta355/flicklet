@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="cherryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E84A6A" />
+      <stop offset="50%" stop-color="#C83E55" />
+      <stop offset="100%" stop-color="#911F36" />
+    </linearGradient>
+
+    <!-- Subtle Ambient Glow -->
+    <radialGradient id="ambientGlow" cx="50%" cy="30%" r="60%">
+      <stop offset="0%" stop-color="#FFA8BA" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#C83E55" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Board Drop Shadow -->
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#4A0815" flood-opacity="0.45" />
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#4A0815" flood-opacity="0.25" />
+    </filter>
+
+    <!-- Clapper Slanted Stripes Pattern Clip -->
+    <clipPath id="clapperTopClip">
+      <path d="M 124 136 L 378 102 C 388 100 396 108 395 118 L 391 148 C 390 156 383 162 374 163 L 120 197 C 110 199 101 191 103 181 L 107 151 C 108 143 115 137 124 136 Z" />
+    </clipPath>
+  </defs>
+
+  <!-- Squircle Base with Soft Shadow -->
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#cherryGrad)" />
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#ambientGlow)" />
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="6" />
+
+  <!-- Clapperboard Group with Shadow -->
+  <g filter="url(#cardShadow)">
+    <!-- Clapperboard Base Body -->
+    <rect x="108" y="210" width="296" height="196" rx="22" fill="#FFF9F6" />
+
+    <!-- Cinema Lines on Base Body -->
+    <!-- Production Title Notch Line -->
+    <rect x="136" y="240" width="96" height="8" rx="4" fill="#E8BDC5" />
+    <rect x="136" y="260" width="140" height="6" rx="3" fill="#F4DEE3" />
+
+    <!-- Scene / Take / Roll Divider Grids -->
+    <line x1="136" y1="288" x2="376" y2="288" stroke="#F4DEE3" stroke-width="3" stroke-linecap="round" />
+    <line x1="216" y1="288" x2="216" y2="348" stroke="#F4DEE3" stroke-width="3" stroke-linecap="round" />
+    <line x1="296" y1="288" x2="296" y2="348" stroke="#F4DEE3" stroke-width="3" stroke-linecap="round" />
+
+    <!-- Scene / Take Mock Small Labels -->
+    <rect x="148" y="300" width="40" height="5" rx="2.5" fill="#E8BDC5" />
+    <rect x="156" y="318" width="24" height="18" rx="3" fill="#C83E55" />
+
+    <rect x="228" y="300" width="40" height="5" rx="2.5" fill="#E8BDC5" />
+    <rect x="236" y="318" width="24" height="18" rx="3" fill="#C83E55" />
+
+    <rect x="308" y="300" width="40" height="5" rx="2.5" fill="#E8BDC5" />
+    <rect x="316" y="318" width="24" height="18" rx="3" fill="#C83E55" />
+
+    <!-- Bottom Heart Accent: "a softer place for stories" -->
+    <path d="M 256 364 C 256 364 242 352 234 360 C 226 368 232 378 256 394 C 280 378 286 368 278 360 C 270 352 256 364 256 364 Z" fill="#C83E55" />
+
+    <!-- Clapper Lower Hinge Plate -->
+    <rect x="108" y="196" width="296" height="24" rx="4" fill="#241015" />
+    <!-- Lower Plate Diagonal Stripes -->
+    <g>
+      <polygon points="120,220 144,196 166,196 142,220" fill="#FFF9F6" />
+      <polygon points="176,220 200,196 222,196 198,220" fill="#FFF9F6" />
+      <polygon points="232,220 256,196 278,196 254,220" fill="#FFF9F6" />
+      <polygon points="288,220 312,196 334,196 310,220" fill="#FFF9F6" />
+      <polygon points="344,220 368,196 390,196 366,220" fill="#FFF9F6" />
+    </g>
+
+    <!-- Angled Top Clapper Arm -->
+    <g>
+      <!-- Arm Background -->
+      <path d="M 124 136 L 378 102 C 388 100 396 108 395 118 L 391 148 C 390 156 383 162 374 163 L 120 197 C 110 199 101 191 103 181 L 107 151 C 108 143 115 137 124 136 Z" fill="#241015" />
+      
+      <!-- Stripes clipped inside top arm -->
+      <g clip-path="url(#clapperTopClip)">
+        <polygon points="120,206 140,120 166,116 146,202" fill="#FFF9F6" />
+        <polygon points="176,198 196,112 222,108 202,194" fill="#FFF9F6" />
+        <polygon points="232,190 252,104 278,100 258,186" fill="#FFF9F6" />
+        <polygon points="288,182 308,96 334,92 314,178" fill="#FFF9F6" />
+        <polygon points="344,174 364,88 390,84 370,170" fill="#FFF9F6" />
+      </g>
+    </g>
+
+    <!-- Hinge Pin / Bolt on Left -->
+    <circle cx="118" cy="188" r="9" fill="#FFF9F6" />
+    <circle cx="118" cy="188" r="5" fill="#C83E55" />
+  </g>
+
+  <!-- Cozy Cinema Star / Sparkle in Top Right -->
+  <g transform="translate(388, 76)">
+    <path d="M 0,-24 Q 0,0 24,0 Q 0,0 0,24 Q 0,0 -24,0 Q 0,0 0,-24 Z" fill="#FFE2B8" />
+    <circle cx="0" cy="0" r="4" fill="#FFF9F6" />
+  </g>
+
+  <!-- Subtle Second Sparkle in Bottom Left -->
+  <g transform="translate(76, 420)">
+    <path d="M 0,-14 Q 0,0 14,0 Q 0,0 0,14 Q 0,0 -14,0 Q 0,0 0,-14 Z" fill="#FFE2B8" opacity="0.85" />
+  </g>
+</svg>

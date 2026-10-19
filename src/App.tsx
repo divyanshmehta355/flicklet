@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
-  Clapperboard,
   Compass,
   Eye,
   EyeOff,
@@ -359,7 +358,7 @@ function App() {
       setCatalogItems(items);
 
       // Automatically trigger library auto-identification in background with TMDB & Gemini AI
-      handleAutoIdentifyLibrary(true);
+      handleAutoIdentifyLibrary(false, true);
     } catch (error) {
       console.error("Folder scan failed:", error);
       setScanError(error instanceof Error ? error.message : String(error));
@@ -380,7 +379,7 @@ function App() {
       setCatalogItems(items);
 
       // Automatically trigger library auto-identification in background with TMDB & Gemini AI
-      handleAutoIdentifyLibrary(true);
+      handleAutoIdentifyLibrary(false, true);
     } catch (error) {
       console.error("Rescan failed:", error);
       setScanError(error instanceof Error ? error.message : String(error));
@@ -520,23 +519,31 @@ function App() {
   }
 
   // Batch auto-identify library items with TMDB & Gemini AI
-  async function handleAutoIdentifyLibrary(silent = false) {
+  async function handleAutoIdentifyLibrary(force = false, silent = false) {
     setIsEnrichingAllTmdb(true);
     if (!silent) {
-      setEnrichNotice("✨ Auto-identifying library with TMDB & Gemini AI...");
+      setEnrichNotice(
+        force
+          ? "✨ Force re-identifying library items with TMDB & Gemini AI..."
+          : "✨ Auto-identifying library with TMDB & Gemini AI..."
+      );
     }
     try {
-      const count = await invoke<number>("auto_identify_all_media");
+      const count = await invoke<number>("auto_identify_all_media", { force });
       const freshItems = await invoke<CatalogItem[]>("get_catalog");
       if (freshItems && freshItems.length > 0) {
         setCatalogItems(freshItems);
       }
-      if (count > 0 || !silent) {
+      if (count > 0) {
         setEnrichNotice(
           `✨ Successfully auto-identified ${count} item${count === 1 ? "" : "s"} with official posters, genres, and metadata!`
         );
-        setTimeout(() => setEnrichNotice(null), 7000);
+      } else if (!silent) {
+        setEnrichNotice(
+          "✨ All titles already have verified posters & metadata. (Click 'Force Refresh' to re-query TMDB & Gemini)."
+        );
       }
+      setTimeout(() => setEnrichNotice(null), 7000);
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       if (!silent) {
@@ -1101,14 +1108,17 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <a className="brand" href="#" onClick={() => handleNavigate("Home")}>
-          <span className="brand-mark">
-            <Clapperboard size={25} strokeWidth={2.2} />
-          </span>
+          <img
+            src="/flicklet-logo.svg"
+            alt="Flicklet"
+            className="brand-mark-img"
+          />
           <span>
             <span className="brand-name">flicklet</span>
             <span className="brand-caption">your cozy cinema</span>
           </span>
         </a>
+
 
         <div className="sidebar-label">YOUR SPACE</div>
 
@@ -1769,7 +1779,17 @@ function App() {
                 <span className="decor-star star-one">✦</span>
                 <span className="decor-star star-two">✧</span>
                 <span className="decor-heart">♡</span>
-                <Clapperboard size={74} strokeWidth={1.1} />
+                <img
+                  src="/flicklet-logo.svg"
+                  alt=""
+                  style={{
+                    width: 76,
+                    height: 76,
+                    borderRadius: 18,
+                    boxShadow: "0 8px 24px rgba(200, 62, 85, 0.25)",
+                    display: "block",
+                  }}
+                />
               </div>
             </section>
 
@@ -2213,24 +2233,48 @@ function App() {
                   </label>
 
                   {hasCatalog && (
-                    <button
-                      className="btn-enrich-all"
-                      onClick={() => handleAutoIdentifyLibrary(false)}
-                      disabled={isEnrichingAllTmdb || isScanning}
-                      title="Automatically identify titles, genres, posters & metadata using TMDB & Gemini AI"
-                    >
-                      {isEnrichingAllTmdb ? (
-                        <>
-                          <Loader2 size={13} className="spin-icon" />
-                          <span>Auto-Identifying...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles size={13} />
-                          <span>Auto-Identify Library</span>
-                        </>
-                      )}
-                    </button>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <button
+                        className="btn-enrich-all"
+                        onClick={() => handleAutoIdentifyLibrary(false, false)}
+                        disabled={isEnrichingAllTmdb || isScanning}
+                        title="Automatically identify titles, genres, posters & metadata using TMDB & Gemini AI"
+                      >
+                        {isEnrichingAllTmdb ? (
+                          <>
+                            <Loader2 size={13} className="spin-icon" />
+                            <span>Auto-Identifying...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles size={13} />
+                            <span>Auto-Identify</span>
+                          </>
+                        )}
+                      </button>
+                      <button
+                        className="btn-enrich-all"
+                        style={{
+                          background: "var(--cream)",
+                          border: "1px solid var(--border)",
+                          color: "var(--ink-muted)",
+                        }}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              "Re-query TMDB & Gemini AI for all items in your catalog to update posters, overviews and ratings?"
+                            )
+                          ) {
+                            handleAutoIdentifyLibrary(true, false);
+                          }
+                        }}
+                        disabled={isEnrichingAllTmdb || isScanning}
+                        title="Force re-fetch official artwork and metadata from TMDB and Gemini for all items"
+                      >
+                        <RefreshCw size={12} />
+                        <span>Force Refresh</span>
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>

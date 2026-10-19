@@ -83,6 +83,85 @@ struct GeminiErrorObj {
     message: Option<String>,
 }
 
+pub const CANDIDATE_MODELS: &[&str] = &[
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.8-flash",
+];
+
+async fn execute_gemini_request<T: Serialize>(
+    api_key: &str,
+    body: &T,
+) -> Result<String, String> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err("Gemini API key is not configured. Please add GEMINI_API_KEY to your .env file or Settings.".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("Flicklet/1.0 (Desktop Cinema Organizer)")
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let mut last_error = String::new();
+
+    for &model in CANDIDATE_MODELS {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            model, key
+        );
+
+        let res = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await;
+
+        match res {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    let text = response
+                        .text()
+                        .await
+                        .map_err(|e| format!("Failed to read Gemini response: {}", e))?;
+                    return Ok(text);
+                }
+
+                let text = response.text().await.unwrap_or_default();
+                let err_msg = serde_json::from_str::<GeminiResponse>(&text)
+                    .ok()
+                    .and_then(|r| r.error)
+                    .and_then(|e| e.message)
+                    .unwrap_or(text);
+
+                // If authentication failed or bad request, stop immediately and return clean error
+                if status == reqwest::StatusCode::BAD_REQUEST
+                    || status == reqwest::StatusCode::UNAUTHORIZED
+                    || status == reqwest::StatusCode::FORBIDDEN
+                {
+                    return Err(format!("Gemini API error ({}): {}", status, err_msg));
+                }
+
+                // If 503 (high demand) or 404 (model unavailable), record and cascade to next model
+                last_error = format!("Model '{}' returned HTTP {}: {}", model, status, err_msg);
+            }
+            Err(e) => {
+                last_error = format!("Network connection error with model '{}': {}", model, e);
+            }
+        }
+    }
+
+    Err(format!(
+        "Gemini API request failed across all candidate models. Last error: {}",
+        last_error
+    ))
+}
+
 pub async fn classify_media_text(
     api_key: &str,
     filename: &str,
@@ -93,11 +172,6 @@ pub async fn classify_media_text(
             "Gemini API key is not configured. Please set your API key in Settings.".to_string(),
         );
     }
-
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={}",
-        api_key.trim()
-    );
 
     let prompt = format!(
         r#"You are a film and television metadata specialist for Flicklet, a personal desktop cinema organizer.
@@ -150,34 +224,7 @@ Respond with a JSON object adhering to this schema:
         },
     };
 
-    let client = reqwest::Client::new();
-    let res = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&req_body)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to connect to Gemini API: {}", e))?;
-
-    let status = res.status();
-    let text = res
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read Gemini response: {}", e))?;
-
-    if !status.is_success() {
-        let err_msg: Result<GeminiResponse, _> = serde_json::from_str(&text);
-        if let Ok(err_obj) = err_msg {
-            if let Some(err) = err_obj.error {
-                return Err(format!(
-                    "Gemini API error ({}): {}",
-                    status,
-                    err.message.unwrap_or_else(|| "Unknown error".to_string())
-                ));
-            }
-        }
-        return Err(format!("Gemini API HTTP {}: {}", status, text));
-    }
+    let text = execute_gemini_request(api_key, &req_body).await?;
 
     let parsed: GeminiResponse = serde_json::from_str(&text)
         .map_err(|e| format!("Could not parse Gemini JSON response: {}", e))?;
@@ -212,14 +259,10 @@ Respond with a JSON object adhering to this schema:
 }
 
 pub async fn test_gemini_key(api_key: &str) -> Result<String, String> {
-    if api_key.trim().is_empty() {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
         return Err("Please enter an API key to test.".to_string());
     }
-
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={}",
-        api_key.trim()
-    );
 
     let req_body = serde_json::json!({
         "contents": [{
@@ -227,25 +270,8 @@ pub async fn test_gemini_key(api_key: &str) -> Result<String, String> {
         }]
     });
 
-    let client = reqwest::Client::new();
-    let res = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&req_body)
-        .send()
-        .await
-        .map_err(|e| format!("Connection error: {}", e))?;
-
-    let status = res.status();
-    if status.is_success() {
-        Ok("Gemini API key is valid and connected!".to_string())
-    } else {
-        let text = res.text().await.unwrap_or_default();
-        Err(format!(
-            "Gemini key verification failed (HTTP {}): {}",
-            status, text
-        ))
-    }
+    execute_gemini_request(trimmed, &req_body).await?;
+    Ok("Gemini API key is valid and connected!".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,11 +296,6 @@ pub async fn search_scene(
             "Gemini API key is not configured. Please add GEMINI_API_KEY to your .env file or Settings.".to_string(),
         );
     }
-
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={}",
-        api_key.trim()
-    );
 
     let prompt = format!(
         r#"You are Flicklet's cozy cinema assistant.
@@ -318,24 +339,7 @@ Respond ONLY with a JSON object adhering to this schema:
         },
     };
 
-    let client = reqwest::Client::new();
-    let res = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&req_body)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to query Gemini assistant: {}", e))?;
-
-    let status = res.status();
-    let text = res
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read Gemini response: {}", e))?;
-
-    if !status.is_success() {
-        return Err(format!("Gemini API error (HTTP {}): {}", status, text));
-    }
+    let text = execute_gemini_request(api_key, &req_body).await?;
 
     let parsed: GeminiResponse = serde_json::from_str(&text)
         .map_err(|e| format!("Failed to parse Gemini response: {}", e))?;
@@ -355,3 +359,62 @@ Respond ONLY with a JSON object adhering to this schema:
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_test_gemini_key() -> Option<String> {
+        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+            let t = key.trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+        for path in [".env", "../.env", "src-tauri/.env"] {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                for line in contents.lines() {
+                    if let Some((k, v)) = line.split_once('=') {
+                        if k.trim() == "GEMINI_API_KEY" {
+                            let clean = v.trim().trim_matches(['"', '\'']).to_string();
+                            if !clean.is_empty() {
+                                return Some(clean);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_live_gemini() {
+        let key = match get_test_gemini_key() {
+            Some(k) => k,
+            None => {
+                println!("Skipping test_live_gemini: GEMINI_API_KEY not configured in env");
+                return;
+            }
+        };
+
+        tauri::async_runtime::block_on(async {
+            let test_res = test_gemini_key(&key).await;
+            println!("test_gemini_key result: {:?}", test_res);
+            assert!(test_res.is_ok(), "Expected Gemini key to connect: {:?}", test_res);
+
+            let classify_res = classify_media_text(
+                &key,
+                "Interstellar.2014.1080p.BluRay.x264.mkv",
+                "Movies",
+            ).await;
+            println!("classify_media_text result: {:?}", classify_res);
+            assert!(classify_res.is_ok());
+            let suggestion = classify_res.unwrap();
+            println!("Suggestion title: {} ({:?}) - Genre: {}", suggestion.display_title, suggestion.release_year, suggestion.primary_genre);
+            assert_eq!(suggestion.display_title, "Interstellar");
+        });
+    }
+}
+
+

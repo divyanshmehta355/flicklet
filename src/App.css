@@ -86,6 +86,21 @@ select:focus-visible {
   box-shadow: 0 6px 15px #c83e5525;
 }
 
+.brand-mark-img {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  object-fit: contain;
+  box-shadow: 0 6px 15px rgba(200, 62, 85, 0.28);
+  display: block;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.brand:hover .brand-mark-img {
+  transform: scale(1.05);
+  box-shadow: 0 8px 20px rgba(200, 62, 85, 0.38);
+}
+
 .brand-name {
   display: block;
   font-family: "Playfair Display", Georgia, serif;

@@ -688,7 +688,7 @@ async fn auto_identify_media_item(
         (item, tmdb_k, gemini_k)
     };
 
-    let client = reqwest::Client::new();
+    let client = tmdb::create_tmdb_client().await;
     let mut show_cache = std::collections::HashMap::new();
     let mut season_cache = std::collections::HashMap::new();
 
@@ -726,6 +726,7 @@ async fn enrich_media_item_with_tmdb(
 
 #[tauri::command]
 async fn auto_identify_all_media(
+    force: Option<bool>,
     db_state: State<'_, DbState>,
 ) -> Result<usize, String> {
     let (items, tmdb_key, gemini_key) = {
@@ -740,14 +741,15 @@ async fn auto_identify_all_media(
         return Err("Neither TMDB nor Gemini API key is configured. Please add an API key in Settings or .env.".to_string());
     }
 
-    let client = reqwest::Client::new();
+    let client = tmdb::create_tmdb_client().await;
     let mut show_cache = std::collections::HashMap::new();
     let mut season_cache = std::collections::HashMap::new();
     let mut identified_count = 0;
+    let should_force = force.unwrap_or(false);
 
     for item in items {
-        // Skip items that are already approved and have poster artwork
-        if item.ai_status == "approved" && item.poster_url.is_some() {
+        // Skip items that are already approved and have poster artwork unless force is requested
+        if !should_force && item.ai_status == "approved" && item.poster_url.is_some() {
             continue;
         }
 
@@ -776,10 +778,12 @@ async fn auto_identify_all_media(
 
 #[tauri::command]
 async fn enrich_all_catalog_items_with_tmdb(
+    force: Option<bool>,
     db_state: State<'_, DbState>,
 ) -> Result<usize, String> {
-    auto_identify_all_media(db_state).await
+    auto_identify_all_media(force, db_state).await
 }
+
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

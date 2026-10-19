@@ -174,36 +174,124 @@ pub fn resolve_tmdb_api_key(conn: &rusqlite::Connection) -> Option<(String, Stri
     None
 }
 
-/// Tests whether the TMDB API key is valid
+const FALLBACK_TMDB_IPS: &[&str] = &[
+    "13.224.245.92:443",
+    "13.224.245.44:443",
+    "13.224.245.47:443",
+    "13.224.245.63:443",
+    "65.9.130.126:443",
+    "65.9.130.34:443",
+];
+
+#[derive(Deserialize)]
+struct DohAnswer {
+    data: String,
+}
+
+#[derive(Deserialize)]
+struct DohResponse {
+    #[serde(rename = "Answer")]
+    answer: Option<Vec<DohAnswer>>,
+}
+
+/// Creates a reqwest Client configured to bypass regional ISP DNS blocks (e.g. Jio/Airtel in India)
+/// by resolving api.themoviedb.org via Cloudflare DNS-over-HTTPS or resilient CloudFront Anycast IPs.
+pub async fn create_tmdb_client() -> reqwest::Client {
+    let mut addrs: Vec<std::net::SocketAddr> = Vec::new();
+
+    // 1. Attempt quick DNS-over-HTTPS query to 1.1.1.1
+    let simple_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(1500))
+        .build();
+
+    if let Ok(c) = simple_client {
+        if let Ok(res) = c
+            .get("https://1.1.1.1/dns-query?name=api.themoviedb.org&type=A")
+            .header("Accept", "application/dns-json")
+            .send()
+            .await
+        {
+            if res.status().is_success() {
+                if let Ok(doh) = res.json::<DohResponse>().await {
+                    if let Some(ans_list) = doh.answer {
+                        for ans in ans_list {
+                            if let Ok(ip) = ans.data.parse::<std::net::IpAddr>() {
+                                addrs.push(std::net::SocketAddr::new(ip, 443));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Fallback to resilient Amazon CloudFront TMDB Anycast IPs if DoH query timed out or failed
+    if addrs.is_empty() {
+        for s in FALLBACK_TMDB_IPS {
+            if let Ok(sa) = s.parse::<std::net::SocketAddr>() {
+                addrs.push(sa);
+            }
+        }
+    }
+
+    let mut builder = reqwest::Client::builder()
+        .user_agent("Flicklet/1.0 (Desktop Cinema Organizer)")
+        .timeout(std::time::Duration::from_secs(12));
+
+    if !addrs.is_empty() {
+        builder = builder.resolve_to_addrs("api.themoviedb.org", &addrs);
+    }
+
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
+
+/// Tests whether the TMDB API key is valid using the official v3 configuration endpoint
 pub async fn test_tmdb_key(api_key: &str) -> Result<String, String> {
-    if api_key.trim().is_empty() {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
         return Err("Please enter a TMDB API key to test.".to_string());
     }
 
     let url = format!(
-        "https://api.themoviedb.org/3/authentication?api_key={}",
-        api_key.trim()
+        "https://api.themoviedb.org/3/configuration?api_key={}",
+        trimmed
     );
 
-    let client = reqwest::Client::new();
-    let res = client
-        .get(&url)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to connect to TMDB: {}", e))?;
+    let client = create_tmdb_client().await;
+    let mut last_error = String::new();
 
-    let status = res.status();
-    if status.is_success() {
-        Ok("TMDB API key is valid and connected!".to_string())
-    } else {
-        let text = res.text().await.unwrap_or_default();
-        Err(format!(
-            "TMDB authentication failed (HTTP {}): {}",
-            status, text
-        ))
+    for attempt in 0..3 {
+        match client
+            .get(&url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(res) => {
+                let status = res.status();
+                if status.is_success() {
+                    return Ok("TMDB API key is valid and connected!".to_string());
+                } else if status == reqwest::StatusCode::UNAUTHORIZED {
+                    return Err("TMDB authentication failed: Invalid API key. Please check your key from themoviedb.org/settings/api.".to_string());
+                } else {
+                    let text = res.text().await.unwrap_or_default();
+                    return Err(format!("TMDB returned HTTP {}: {}", status, text));
+                }
+            }
+            Err(e) => {
+                last_error = format!("{}", e);
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
     }
+
+    Err(format!("Failed to connect to TMDB: {}", last_error))
 }
+
+
 
 /// Intelligent parser for video filenames and raw release titles
 pub fn parse_media_filename(raw: &str) -> ExtractedMediaInfo {
@@ -666,7 +754,7 @@ pub async fn search_tmdb(
     }
 
     let info = parse_media_filename(title);
-    let client = reqwest::Client::new();
+    let client = create_tmdb_client().await;
 
     // 1. If this is a TV series episode (e.g. S1 E1 or S01E01), fetch exact episode metadata!
     if (info.is_series || media_type == Some("series"))
@@ -812,3 +900,60 @@ async fn execute_search(
         }
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_test_tmdb_key() -> Option<String> {
+        if let Ok(key) = std::env::var("TMDB_API_KEY") {
+            let t = key.trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+        for path in [".env", "../.env", "src-tauri/.env"] {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                for line in contents.lines() {
+                    if let Some((k, v)) = line.split_once('=') {
+                        if k.trim() == "TMDB_API_KEY" {
+                            let clean = v.trim().trim_matches(['"', '\'']).to_string();
+                            if !clean.is_empty() {
+                                return Some(clean);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_live_tmdb() {
+        let key = match get_test_tmdb_key() {
+            Some(k) => k,
+            None => {
+                println!("Skipping test_live_tmdb: TMDB_API_KEY not configured in env");
+                return;
+            }
+        };
+
+        tauri::async_runtime::block_on(async {
+            let res = test_tmdb_key(&key).await;
+            println!("test_tmdb_key result: {:?}", res);
+            assert!(res.is_ok(), "Expected valid test connection result: {:?}", res);
+
+            let search_res = search_tmdb("Inception", Some(2010), Some("movie"), &key).await;
+            println!("search_tmdb result: {:?}", search_res);
+            assert!(search_res.is_ok());
+            let details = search_res.unwrap();
+            assert!(details.is_some());
+            let d = details.unwrap();
+            println!("Found movie: {} ({:?}) - Poster: {:?}", d.title, d.release_year, d.poster_url);
+        });
+    }
+}
+
+
+
