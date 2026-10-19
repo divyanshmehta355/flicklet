@@ -101,28 +101,169 @@ pub fn is_cross_drive(src: &Path, dst: &Path) -> bool {
     src_prefix != dst_prefix
 }
 
-/// Build the structured proposed relative path per Section 10 rules
-pub fn build_proposed_relative_path(item: &CatalogItem) -> (PathBuf, String) {
-    let ext = item.extension.trim_start_matches('.').to_lowercase();
-    let is_series = item.media_type.eq_ignore_ascii_case("series");
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrganizeOptions {
+    pub group_movies_by_genre: Option<bool>,
+    pub include_episode_title: Option<bool>,
+    pub cleanup_empty_folders: Option<bool>,
+}
 
-    if is_series {
-        let series_name = sanitize_component(
-            item.series_title
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or(&item.display_title),
-        );
-        let season_num = item.season_number.unwrap_or(1);
-        let episode_num = item.episode_number.unwrap_or(1);
-        let season_folder = format!("Season {:02}", season_num);
+impl Default for OrganizeOptions {
+    fn default() -> Self {
+        Self {
+            group_movies_by_genre: Some(true),
+            include_episode_title: Some(true),
+            cleanup_empty_folders: Some(true),
+        }
+    }
+}
 
-        let ep_title_part = if let Some(idx) = item.display_title.find(": ") {
-            let sub = item.display_title[idx + 2..].trim();
-            if !sub.is_empty() {
-                format!(" - {}", sanitize_component(sub))
+/// Helper to clean trailing season/episode noise tokens like " S01", " S1", " Season 1", " S01E01"
+pub fn clean_trailing_season_noise(s: &str) -> String {
+    let mut current = s.trim().to_string();
+    loop {
+        let lower = current.to_lowercase();
+        let mut trimmed = false;
+        for prefix in [" season", " - s", "_s", ".s", " s"] {
+            if let Some(idx) = lower.rfind(prefix) {
+                let remainder = &lower[idx + prefix.len()..];
+                if !remainder.is_empty()
+                    && remainder
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == 'e' || c == ' ' || c == '-' || c == '_')
+                {
+                    current = current[..idx].trim().to_string();
+                    trimmed = true;
+                    break;
+                }
+            }
+        }
+        if !trimmed {
+            break;
+        }
+    }
+    current.trim().to_string()
+}
+
+#[derive(Debug, Clone)]
+pub struct DetectedSeriesInfo {
+    pub series_name: String,
+    pub season_number: u32,
+    pub episode_number: u32,
+    pub episode_title: Option<String>,
+}
+
+/// Robust detector for TV show identity across DB metadata and raw filenames
+pub fn detect_series_info(item: &CatalogItem) -> Option<DetectedSeriesInfo> {
+    let filename_info = crate::tmdb::parse_media_filename(&item.filename);
+    let title_info = crate::tmdb::parse_media_filename(&item.display_title);
+
+    let is_series = item.media_type.eq_ignore_ascii_case("series")
+        || item.series_title.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+        || item.season_number.is_some()
+        || filename_info.is_series
+        || title_info.is_series;
+
+    if !is_series {
+        return None;
+    }
+
+    // 1. Determine canonical series title (Show Name)
+    let mut raw_show_name = String::new();
+    if let Some(s) = item.series_title.as_deref().filter(|s| !s.trim().is_empty()) {
+        raw_show_name = s.to_string();
+    }
+
+    if raw_show_name.is_empty() {
+        if !filename_info.clean_title.is_empty() {
+            raw_show_name = filename_info.clean_title.clone();
+        } else if !title_info.clean_title.is_empty() {
+            raw_show_name = title_info.clean_title.clone();
+        } else {
+            let base = if let Some(idx) = item.display_title.find(": ") {
+                &item.display_title[..idx]
             } else {
-                String::new()
+                &item.display_title
+            };
+            raw_show_name = base.to_string();
+        }
+    }
+
+    let cleaned = clean_trailing_season_noise(&raw_show_name);
+    let series_name = sanitize_component(if cleaned.is_empty() { "Untitled Series" } else { &cleaned });
+
+    // 2. Season and Episode numbers
+    let season_number = item
+        .season_number
+        .or(filename_info.season_number)
+        .or(title_info.season_number)
+        .unwrap_or(1);
+
+    let episode_number = item
+        .episode_number
+        .or(filename_info.episode_number)
+        .or(title_info.episode_number)
+        .unwrap_or(1);
+
+    // 3. Episode Title (e.g. from "Show S1 E1: The Pilot")
+    let episode_title = if let Some(idx) = item.display_title.find(": ") {
+        let sub = item.display_title[idx + 2..].trim();
+        if !sub.is_empty() && !sub.eq_ignore_ascii_case(&format!("Episode {}", episode_number)) {
+            Some(sanitize_component(sub))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Some(DetectedSeriesInfo {
+        series_name,
+        season_number,
+        episode_number,
+        episode_title,
+    })
+}
+
+/// Safely remove empty parent directories after a file is moved out
+pub fn try_cleanup_empty_parent_dirs(path: &Path, stop_at: Option<&Path>) {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if let Some(stop) = stop_at {
+            if dir == stop {
+                break;
+            }
+        }
+        if dir.parent().is_none() || is_system_or_dangerous_path(dir) {
+            break;
+        }
+        if let Ok(mut entries) = fs::read_dir(dir) {
+            if entries.next().is_none() {
+                let _ = fs::remove_dir(dir);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+        current = dir.parent();
+    }
+}
+
+/// Build the structured proposed relative path per Plex/Jellyfin standard
+pub fn build_proposed_relative_path(
+    item: &CatalogItem,
+    options: &OrganizeOptions,
+) -> (PathBuf, String) {
+    let ext = item.extension.trim_start_matches('.').to_lowercase();
+
+    if let Some(series_info) = detect_series_info(item) {
+        let season_folder = format!("Season {:02}", series_info.season_number);
+
+        let ep_title_part = if options.include_episode_title.unwrap_or(true) {
+            match &series_info.episode_title {
+                Some(title) if !title.is_empty() => format!(" - {}", title),
+                _ => String::new(),
             }
         } else {
             String::new()
@@ -130,16 +271,24 @@ pub fn build_proposed_relative_path(item: &CatalogItem) -> (PathBuf, String) {
 
         let final_filename = format!(
             "{} - S{:02}E{:02}{}.{}",
-            series_name, season_num, episode_num, ep_title_part, ext
+            series_info.series_name,
+            series_info.season_number,
+            series_info.episode_number,
+            ep_title_part,
+            ext
         );
+
+        // TV Shows / {Show Name} / Season {XX} / {Show Name} - S{XX}E{YY} - {Title}.ext
+        // All episodes of the season live together in Season XX. Never a folder per episode!
         let rel_path = PathBuf::from("TV Shows")
-            .join(&series_name)
+            .join(&series_info.series_name)
             .join(&season_folder)
             .join(&final_filename);
 
         (rel_path, final_filename)
     } else {
-        // Movies / {Genre} / {Title} ({Year}) / {Title} ({Year}).{ext}
+        // Movies: Movies / [Genre /] Title (Year).ext
+        // Clean layout: No single-file folders!
         let genre = sanitize_component(
             item.primary_genre
                 .as_deref()
@@ -147,15 +296,17 @@ pub fn build_proposed_relative_path(item: &CatalogItem) -> (PathBuf, String) {
                 .unwrap_or("Other"),
         );
         let title = sanitize_component(&item.display_title);
-        let folder_and_file_name = match item.release_year {
+        let filename_part = match item.release_year {
             Some(year) if year > 1880 && year < 2100 => format!("{} ({})", title, year),
             _ => title,
         };
-        let final_filename = format!("{}.{}", folder_and_file_name, ext);
-        let rel_path = PathBuf::from("Movies")
-            .join(&genre)
-            .join(&folder_and_file_name)
-            .join(&final_filename);
+        let final_filename = format!("{}.{}", filename_part, ext);
+
+        let rel_path = if options.group_movies_by_genre.unwrap_or(true) {
+            PathBuf::from("Movies").join(&genre).join(&final_filename)
+        } else {
+            PathBuf::from("Movies").join(&final_filename)
+        };
 
         (rel_path, final_filename)
     }
@@ -193,6 +344,7 @@ pub fn resolve_collision_path(target_path: &Path, existing_set: &HashSet<PathBuf
 pub fn generate_organize_preview(
     target_root: &str,
     items: &[CatalogItem],
+    options: &OrganizeOptions,
 ) -> OrganizePreviewReport {
     let target_root_path = PathBuf::from(target_root);
     let mut plan_items = Vec::new();
@@ -209,7 +361,7 @@ pub fn generate_organize_preview(
         }
 
         let source = PathBuf::from(&item.path);
-        let (rel_path, _) = build_proposed_relative_path(item);
+        let (rel_path, _) = build_proposed_relative_path(item, options);
         let proposed_target = target_root_path.join(&rel_path);
 
         let is_system = is_system_or_dangerous_path(&source);
@@ -281,6 +433,7 @@ pub fn execute_organize_plan(
     conn: &rusqlite::Connection,
     plan: &[OrganizePlanItem],
     double_confirmed: bool,
+    options: &OrganizeOptions,
 ) -> Result<OrganizeExecutionResult, String> {
     if !double_confirmed {
         return Err("Explicit double confirmation is required before any files can be moved.".to_string());
@@ -400,6 +553,11 @@ pub fn execute_organize_plan(
                 // Update SQLite catalog item path
                 let _ = db::update_item_path(conn, &item.id, &actual_target_str, &new_filename);
 
+                // Clean up empty parent directories at source
+                if options.cleanup_empty_folders.unwrap_or(true) {
+                    try_cleanup_empty_parent_dirs(&source, None);
+                }
+
                 successful_moves += 1;
             }
             Err(e) => {
@@ -477,6 +635,7 @@ pub fn rollback_organization_batch(
                     .to_string();
                 let _ = db::update_item_path(conn, item_id, &entry.original_path, &orig_filename);
             }
+            try_cleanup_empty_parent_dirs(&current_path, None);
             restored_count += 1;
         } else if let Err(e) = move_res {
             rollback_errors.push(e);
@@ -494,5 +653,151 @@ pub fn rollback_organization_batch(
         ))
     } else {
         Ok(restored_count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_mock_catalog_item(
+        filename: &str,
+        display_title: &str,
+        media_type: &str,
+        series_title: Option<&str>,
+        season: Option<u32>,
+        episode: Option<u32>,
+        genre: Option<&str>,
+        year: Option<u32>,
+    ) -> CatalogItem {
+        CatalogItem {
+            id: "test-id".to_string(),
+            path: format!("D:\\Downloads\\{}", filename),
+            filename: filename.to_string(),
+            extension: ".mkv".to_string(),
+            size_bytes: 1024 * 1024 * 500,
+            last_modified: Some(1700000000),
+            media_type: media_type.to_string(),
+            display_title: display_title.to_string(),
+            release_year: year,
+            primary_genre: genre.map(|g| g.to_string()),
+            secondary_genres: Vec::new(),
+            series_title: series_title.map(|s| s.to_string()),
+            season_number: season,
+            episode_number: episode,
+            is_favorite: false,
+            ai_status: "approved".to_string(),
+            last_scan_time: 1700000000,
+            is_missing: false,
+            poster_url: None,
+            backdrop_url: None,
+            overview: None,
+            vote_average: None,
+            tmdb_id: None,
+        }
+    }
+
+    #[test]
+    fn test_series_episodes_consolidated_into_same_show_and_season_folder() {
+        let ep1 = create_mock_catalog_item(
+            "Legacies.S01E01.720p.mkv",
+            "Legacies S1 E1: This Is the Part Where You Run",
+            "series",
+            Some("Legacies"),
+            Some(1),
+            Some(1),
+            Some("Drama"),
+            Some(2018),
+        );
+        let ep2 = create_mock_catalog_item(
+            "Legacies.S01E02.720p.mkv",
+            "Legacies S1 E2: Some People Just Want to Watch the World Burn",
+            "series",
+            Some("Legacies"),
+            Some(1),
+            Some(2),
+            Some("Drama"),
+            Some(2018),
+        );
+
+        let options = OrganizeOptions::default();
+        let (rel1, file1) = build_proposed_relative_path(&ep1, &options);
+        let (rel2, file2) = build_proposed_relative_path(&ep2, &options);
+
+        // Verify neither creates an episode-specific folder!
+        assert_eq!(
+            rel1.to_string_lossy().replace('\\', "/"),
+            "TV Shows/Legacies/Season 01/Legacies - S01E01 - This Is the Part Where You Run.mkv"
+        );
+        assert_eq!(
+            rel2.to_string_lossy().replace('\\', "/"),
+            "TV Shows/Legacies/Season 01/Legacies - S01E02 - Some People Just Want to Watch the World Burn.mkv"
+        );
+
+        // Crucial test: Parent directories MUST be completely identical!
+        assert_eq!(rel1.parent(), rel2.parent());
+        assert_eq!(
+            rel1.parent().unwrap().to_string_lossy().replace('\\', "/"),
+            "TV Shows/Legacies/Season 01"
+        );
+        assert_eq!(file1, "Legacies - S01E01 - This Is the Part Where You Run.mkv");
+        assert_eq!(file2, "Legacies - S01E02 - Some People Just Want to Watch the World Burn.mkv");
+    }
+
+    #[test]
+    fn test_series_detection_from_raw_title_without_series_title_in_db() {
+        let ep = create_mock_catalog_item(
+            "Legacies.S01E01.mkv",
+            "Legacies S1 E1",
+            "unknown", // media_type was not even series in DB!
+            None,      // series_title was None!
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let options = OrganizeOptions::default();
+        let (rel, file) = build_proposed_relative_path(&ep, &options);
+
+        // It detects show name "Legacies" and season 1, episode 1!
+        assert_eq!(
+            rel.to_string_lossy().replace('\\', "/"),
+            "TV Shows/Legacies/Season 01/Legacies - S01E01.mkv"
+        );
+        assert_eq!(file, "Legacies - S01E01.mkv");
+    }
+
+    #[test]
+    fn test_movies_clean_layout_without_redundant_single_file_subfolders() {
+        let movie = create_mock_catalog_item(
+            "Inception.2010.1080p.mkv",
+            "Inception",
+            "movie",
+            None,
+            None,
+            None,
+            Some("Science Fiction"),
+            Some(2010),
+        );
+
+        let options = OrganizeOptions::default();
+        let (rel, file) = build_proposed_relative_path(&movie, &options);
+
+        // Directly inside Movies/Science Fiction/ without an extra Inception (2010) folder!
+        assert_eq!(
+            rel.to_string_lossy().replace('\\', "/"),
+            "Movies/Science Fiction/Inception (2010).mkv"
+        );
+        assert_eq!(file, "Inception (2010).mkv");
+    }
+
+    #[test]
+    fn test_clean_trailing_season_noise() {
+        assert_eq!(clean_trailing_season_noise("Legacies S1 E1"), "Legacies");
+        assert_eq!(clean_trailing_season_noise("Legacies S01"), "Legacies");
+        assert_eq!(clean_trailing_season_noise("Legacies - S01E02"), "Legacies");
+        assert_eq!(clean_trailing_season_noise("The Vampire Diaries Season 2"), "The Vampire Diaries");
+        assert_eq!(clean_trailing_season_noise("Vikings"), "Vikings");
     }
 }

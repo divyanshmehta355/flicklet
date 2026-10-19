@@ -329,6 +329,7 @@ fn play_in_vlc(file_path: String, start_time_seconds: Option<u64>) -> Result<(),
 fn preview_organize(
     target_root: String,
     item_ids: Option<Vec<String>>,
+    options: Option<organizer::OrganizeOptions>,
     db_state: State<'_, DbState>,
 ) -> Result<organizer::OrganizePreviewReport, String> {
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
@@ -339,17 +340,20 @@ fn preview_organize(
         None => all_items,
     };
 
-    Ok(organizer::generate_organize_preview(&target_root, &items_to_preview))
+    let opt = options.unwrap_or_default();
+    Ok(organizer::generate_organize_preview(&target_root, &items_to_preview, &opt))
 }
 
 #[tauri::command]
 fn execute_organize(
     plan: Vec<organizer::OrganizePlanItem>,
     double_confirmed: bool,
+    options: Option<organizer::OrganizeOptions>,
     db_state: State<'_, DbState>,
 ) -> Result<organizer::OrganizeExecutionResult, String> {
     let conn = db_state.0.lock().map_err(|e| e.to_string())?;
-    organizer::execute_organize_plan(&conn, &plan, double_confirmed)
+    let opt = options.unwrap_or_default();
+    organizer::execute_organize_plan(&conn, &plan, double_confirmed, &opt)
 }
 
 #[tauri::command]

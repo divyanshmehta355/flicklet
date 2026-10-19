@@ -285,6 +285,11 @@ function App() {
 
   // Safe File Organization state
   const [organizeTargetRoot, setOrganizeTargetRoot] = useState<string>("");
+  const [organizeOptions, setOrganizeOptions] = useState({
+    group_movies_by_genre: true,
+    include_episode_title: true,
+    cleanup_empty_folders: true,
+  });
   const [organizePreview, setOrganizePreview] = useState<OrganizePreviewReport | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
@@ -919,8 +924,16 @@ function App() {
   }
 
   // Generate Dry-Run Preview
-  async function handleGeneratePreview(targetOverride?: string) {
+  async function handleGeneratePreview(
+    targetOverride?: string,
+    optionsOverride?: {
+      group_movies_by_genre: boolean;
+      include_episode_title: boolean;
+      cleanup_empty_folders: boolean;
+    }
+  ) {
     const target = targetOverride || organizeTargetRoot;
+    const opts = optionsOverride || organizeOptions;
     if (!target.trim()) {
       setOrganizeMessage({
         type: "error",
@@ -935,6 +948,7 @@ function App() {
       const report = await invoke<OrganizePreviewReport>("preview_organize", {
         targetRoot: target.trim(),
         itemIds: null,
+        options: opts,
       });
       setOrganizePreview(report);
     } catch (err) {
@@ -944,6 +958,14 @@ function App() {
       });
     } finally {
       setIsLoadingPreview(false);
+    }
+  }
+
+  function handleToggleOrganizeOption(key: keyof typeof organizeOptions) {
+    const updated = { ...organizeOptions, [key]: !organizeOptions[key] };
+    setOrganizeOptions(updated);
+    if (organizeTargetRoot.trim() && catalogItems.length > 0) {
+      handleGeneratePreview(undefined, updated);
     }
   }
 
@@ -994,6 +1016,7 @@ function App() {
       const result = await invoke<OrganizeExecutionResult>("execute_organize", {
         plan: organizePreview.items,
         doubleConfirmed: true,
+        options: organizeOptions,
       });
 
       setLastExecutionResult(result);
@@ -1433,6 +1456,53 @@ function App() {
                   )}
                 </button>
               </div>
+
+              {/* Organization Rules & Structure Preview Banner */}
+              <div className="organize-rules-banner">
+                <div className="organize-rule-item">
+                  <div className="rule-badge tv">TV SHOWS</div>
+                  <div className="rule-text">
+                    <strong>TV Shows / {'{Show Name}'} / Season {'{XX}'} / {'{Show Name}'} - S{'{XX}'}E{'{YY}'} - {'{Title}'}.ext</strong>
+                    <span>Episodes are consolidated cleanly into Season folders — no single-file folders.</span>
+                  </div>
+                </div>
+                <div className="organize-rule-item">
+                  <div className="rule-badge movie">MOVIES</div>
+                  <div className="rule-text">
+                    <strong>Movies / {'{Genre}'} / {'{Title}'} ({'{Year}'}).ext</strong>
+                    <span>Direct movie files in genre folders — no single-file wrapper subfolders.</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Toggles for custom organization preferences */}
+              <div className="organize-options-row">
+                <label className="organize-option-toggle">
+                  <input
+                    type="checkbox"
+                    checked={organizeOptions.group_movies_by_genre}
+                    onChange={() => handleToggleOrganizeOption("group_movies_by_genre")}
+                  />
+                  <span>Group Movies by Genre</span>
+                </label>
+                <label className="organize-option-toggle">
+                  <input
+                    type="checkbox"
+                    checked={organizeOptions.include_episode_title}
+                    onChange={() => handleToggleOrganizeOption("include_episode_title")}
+                  />
+                  <span>Include Episode Titles in TV Filenames</span>
+                </label>
+                <label className="organize-option-toggle">
+                  <input
+                    type="checkbox"
+                    checked={organizeOptions.cleanup_empty_folders}
+                    onChange={() => handleToggleOrganizeOption("cleanup_empty_folders")}
+                  />
+                  <span>Clean Up Empty Source Folders</span>
+                </label>
+              </div>
+
               {catalogItems.length === 0 && (
                 <p style={{ margin: "8px 0 0", fontSize: 11, color: "var(--muted)" }}>
                   💡 Please scan a folder from the Home screen first so Flicklet has titles to organize.
