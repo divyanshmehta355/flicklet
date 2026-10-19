@@ -27,6 +27,11 @@ pub struct CatalogItem {
     pub ai_status: String, // "unclassified", "classified", "reviewed"
     pub is_missing: bool,
     pub last_scan_time: u64,
+    pub poster_url: Option<String>,
+    pub backdrop_url: Option<String>,
+    pub overview: Option<String>,
+    pub vote_average: Option<f64>,
+    pub tmdb_id: Option<i64>,
 }
 
 pub struct DbState(pub Mutex<Connection>);
@@ -65,10 +70,22 @@ fn init_schema(conn: &Connection) -> SqlResult<()> {
             ai_status TEXT NOT NULL DEFAULT 'unclassified',
             is_missing INTEGER NOT NULL DEFAULT 0,
             last_scan_time INTEGER NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            poster_url TEXT,
+            backdrop_url TEXT,
+            overview TEXT,
+            vote_average REAL,
+            tmdb_id INTEGER
         )",
         [],
     )?;
+
+    // Safe migration: add TMDB columns to existing databases if missing
+    let _ = conn.execute("ALTER TABLE media_catalog ADD COLUMN poster_url TEXT", []);
+    let _ = conn.execute("ALTER TABLE media_catalog ADD COLUMN backdrop_url TEXT", []);
+    let _ = conn.execute("ALTER TABLE media_catalog ADD COLUMN overview TEXT", []);
+    let _ = conn.execute("ALTER TABLE media_catalog ADD COLUMN vote_average REAL", []);
+    let _ = conn.execute("ALTER TABLE media_catalog ADD COLUMN tmdb_id INTEGER", []);
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS settings (
@@ -137,8 +154,9 @@ pub fn upsert_scanned_videos(
     let mut insert_stmt = conn.prepare(
         "INSERT INTO media_catalog (
             id, path, filename, extension, size_bytes, last_modified,
-            display_title, last_scan_time, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            media_type, display_title, release_year, series_title,
+            season_number, episode_number, last_scan_time, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )?;
 
     for v in videos {
@@ -152,7 +170,48 @@ pub fn upsert_scanned_videos(
             ])?;
         } else {
             let id = Uuid::new_v4().to_string();
-            let display_title = derive_initial_title(&v.name);
+            let info = crate::tmdb::parse_media_filename(&v.name);
+            let (display_title, media_type, series_title, season_num, episode_num, release_year) =
+                if info.is_series && info.season_number.is_some() && info.episode_number.is_some() {
+                    let s = info.season_number.unwrap();
+                    let e = info.episode_number.unwrap();
+                    let title = format!("{} S{} E{}", info.clean_title, s, e);
+                    (
+                        title,
+                        "series".to_string(),
+                        Some(info.clean_title),
+                        Some(s),
+                        Some(e),
+                        info.year,
+                    )
+                } else if !info.clean_title.is_empty() {
+                    (
+                        info.clean_title.clone(),
+                        if info.is_series {
+                            "series".to_string()
+                        } else {
+                            "movie".to_string()
+                        },
+                        if info.is_series {
+                            Some(info.clean_title)
+                        } else {
+                            None
+                        },
+                        info.season_number,
+                        info.episode_number,
+                        info.year,
+                    )
+                } else {
+                    (
+                        derive_initial_title(&v.name),
+                        "unknown".to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                };
+
             insert_stmt.execute(params![
                 id,
                 v.path,
@@ -160,7 +219,12 @@ pub fn upsert_scanned_videos(
                 v.extension,
                 v.size_bytes as i64,
                 v.modified_timestamp.map(|t| t as i64),
+                media_type,
                 display_title,
+                release_year,
+                series_title,
+                season_num,
+                episode_num,
                 now as i64,
                 now as i64,
             ])?;
@@ -184,7 +248,8 @@ pub fn get_all_catalog_items(conn: &Connection) -> SqlResult<Vec<CatalogItem>> {
         "SELECT id, path, filename, extension, size_bytes, last_modified,
                 media_type, display_title, release_year, primary_genre,
                 secondary_genres, series_title, season_number, episode_number,
-                is_favorite, ai_status, is_missing, last_scan_time
+                is_favorite, ai_status, is_missing, last_scan_time,
+                poster_url, backdrop_url, overview, vote_average, tmdb_id
          FROM media_catalog
          ORDER BY is_favorite DESC, display_title COLLATE NOCASE ASC",
     )?;
@@ -217,6 +282,11 @@ pub fn get_all_catalog_items(conn: &Connection) -> SqlResult<Vec<CatalogItem>> {
             ai_status: row.get(15)?,
             is_missing: row.get::<_, i64>(16)? == 1,
             last_scan_time: scan_raw.max(0) as u64,
+            poster_url: row.get(18)?,
+            backdrop_url: row.get(19)?,
+            overview: row.get(20)?,
+            vote_average: row.get(21)?,
+            tmdb_id: row.get(22)?,
         })
     })?;
 
@@ -264,7 +334,8 @@ pub fn get_catalog_item_by_id(conn: &Connection, id: &str) -> SqlResult<Option<C
         "SELECT id, path, filename, extension, size_bytes, last_modified,
                 media_type, display_title, release_year, primary_genre,
                 secondary_genres, series_title, season_number, episode_number,
-                is_favorite, ai_status, is_missing, last_scan_time
+                is_favorite, ai_status, is_missing, last_scan_time,
+                poster_url, backdrop_url, overview, vote_average, tmdb_id
          FROM media_catalog
          WHERE id = ?1",
     )?;
@@ -297,6 +368,11 @@ pub fn get_catalog_item_by_id(conn: &Connection, id: &str) -> SqlResult<Option<C
             ai_status: row.get(15)?,
             is_missing: row.get::<_, i64>(16)? == 1,
             last_scan_time: scan_raw.max(0) as u64,
+            poster_url: row.get(18)?,
+            backdrop_url: row.get(19)?,
+            overview: row.get(20)?,
+            vote_average: row.get(21)?,
+            tmdb_id: row.get(22)?,
         })
     })?;
 
@@ -343,6 +419,57 @@ pub fn update_catalog_metadata(
             season_number.map(|s| s as i64),
             episode_number.map(|e| e as i64),
             ai_status,
+            id,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update_catalog_tmdb_metadata(
+    conn: &Connection,
+    id: &str,
+    poster_url: Option<&str>,
+    backdrop_url: Option<&str>,
+    overview: Option<&str>,
+    vote_average: Option<f64>,
+    tmdb_id: Option<i64>,
+    display_title: Option<&str>,
+    release_year: Option<u32>,
+    media_type: Option<&str>,
+    series_title: Option<&str>,
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
+    primary_genre: Option<&str>,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE media_catalog
+         SET poster_url = COALESCE(?1, poster_url),
+             backdrop_url = COALESCE(?2, backdrop_url),
+             overview = COALESCE(?3, overview),
+             vote_average = COALESCE(?4, vote_average),
+             tmdb_id = COALESCE(?5, tmdb_id),
+             display_title = COALESCE(?6, display_title),
+             release_year = COALESCE(?7, release_year),
+             media_type = COALESCE(?8, media_type),
+             series_title = COALESCE(?9, series_title),
+             season_number = COALESCE(?10, season_number),
+             episode_number = COALESCE(?11, episode_number),
+             primary_genre = COALESCE(?12, primary_genre),
+             ai_status = 'approved'
+         WHERE id = ?13",
+        params![
+            poster_url,
+            backdrop_url,
+            overview,
+            vote_average,
+            tmdb_id,
+            display_title,
+            release_year.map(|y| y as i64),
+            media_type,
+            series_title,
+            season_number.map(|s| s as i64),
+            episode_number.map(|e| e as i64),
+            primary_genre,
             id,
         ],
     )?;

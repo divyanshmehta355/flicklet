@@ -1,6 +1,7 @@
-import { useState, useEffect, type FormEvent } from "react";
+import { useState, useEffect, useMemo, type FormEvent } from "react";
 import {
   AlertCircle,
+  ArrowLeft,
   ArrowRight,
   CheckCircle2,
   Clapperboard,
@@ -13,6 +14,7 @@ import {
   FolderOpen,
   FolderTree,
   Heart,
+  Image as ImageIcon,
   Key,
   Loader2,
   Play,
@@ -22,6 +24,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Star,
   Tv,
   Undo2,
   WandSparkles,
@@ -60,6 +63,11 @@ interface CatalogItem {
   ai_status: string;
   is_missing: boolean;
   last_scan_time: number;
+  poster_url: string | null;
+  backdrop_url: string | null;
+  overview: string | null;
+  vote_average: number | null;
+  tmdb_id: number | null;
 }
 
 interface AiClassificationSuggestion {
@@ -210,6 +218,17 @@ function App() {
   const [genre, setGenre] = useState("All");
   const [question, setQuestion] = useState("");
 
+  // Series Hub & Grouping state
+  const [selectedSeries, setSelectedSeries] = useState<string | null>(null);
+  const [selectedSeason, setSelectedSeason] = useState<number | "all">("all");
+  const [seriesViewMode, setSeriesViewMode] = useState<"grouped" | "episodes">("grouped");
+
+  function handleNavigate(tab: string) {
+    setActiveNav(tab);
+    setSelectedSeries(null);
+    setSelectedSeason("all");
+  }
+
   // Persistent SQLite catalog state
   const [catalogItems, setCatalogItems] = useState<CatalogItem[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
@@ -230,6 +249,24 @@ function App() {
     type: "success" | "error" | "info";
     text: string;
   } | null>(null);
+
+  // TMDB API Key and Enrichment state
+  const [tmdbKeyInput, setTmdbKeyInput] = useState("");
+  const [tmdbKeyStatus, setTmdbKeyStatus] = useState<ApiKeyStatus>({
+    has_key: false,
+    source: "none",
+    masked_key: "",
+  });
+  const [showTmdbKey, setShowTmdbKey] = useState(false);
+  const [isSavingTmdbKey, setIsSavingTmdbKey] = useState(false);
+  const [isTestingTmdbKey, setIsTestingTmdbKey] = useState(false);
+  const [tmdbSettingsMessage, setTmdbSettingsMessage] = useState<{
+    type: "success" | "error" | "info";
+    text: string;
+  } | null>(null);
+  const [enrichingItemId, setEnrichingItemId] = useState<string | null>(null);
+  const [isEnrichingAllTmdb, setIsEnrichingAllTmdb] = useState(false);
+  const [enrichNotice, setEnrichNotice] = useState<string | null>(null);
 
   // AI Classification review state
   const [classifyingItemId, setClassifyingItemId] = useState<string | null>(null);
@@ -261,7 +298,7 @@ function App() {
     text: string;
   } | null>(null);
 
-  // Load existing persistent catalog, API key status, and check VLC on launch
+  // Load existing persistent catalog, API key status, and VLC on launch
   useEffect(() => {
     async function initApp() {
       try {
@@ -278,6 +315,13 @@ function App() {
         setApiKeyStatus(status);
       } catch (err) {
         console.error("Could not check Gemini API key status:", err);
+      }
+
+      try {
+        const tmdbStatus = await invoke<ApiKeyStatus>("get_tmdb_api_key_status");
+        setTmdbKeyStatus(tmdbStatus);
+      } catch (err) {
+        console.error("Could not check TMDB API key status:", err);
       }
 
       try {
@@ -308,6 +352,9 @@ function App() {
 
       const items = await invoke<CatalogItem[]>("scan_folder", { folderPath });
       setCatalogItems(items);
+
+      // Automatically trigger library auto-identification in background with TMDB & Gemini AI
+      handleAutoIdentifyLibrary(true);
     } catch (error) {
       console.error("Folder scan failed:", error);
       setScanError(error instanceof Error ? error.message : String(error));
@@ -326,6 +373,9 @@ function App() {
         folderPath: selectedFolder,
       });
       setCatalogItems(items);
+
+      // Automatically trigger library auto-identification in background with TMDB & Gemini AI
+      handleAutoIdentifyLibrary(true);
     } catch (error) {
       console.error("Rescan failed:", error);
       setScanError(error instanceof Error ? error.message : String(error));
@@ -391,35 +441,147 @@ function App() {
     }
   }
 
-  // Request AI classification for a single catalog item
-  async function handleClassifyItem(item: CatalogItem) {
-    setClassifyingItemId(item.id);
+  // Save TMDB API key into local SQLite settings
+  async function handleSaveTmdbKey() {
+    if (!tmdbKeyInput.trim()) return;
+    setIsSavingTmdbKey(true);
+    setTmdbSettingsMessage(null);
     try {
-      const suggestion = await invoke<AiClassificationSuggestion>(
-        "classify_media_item",
-        { id: item.id }
+      await invoke("save_tmdb_api_key", { apiKey: tmdbKeyInput });
+      const status = await invoke<ApiKeyStatus>("get_tmdb_api_key_status");
+      setTmdbKeyStatus(status);
+      setTmdbKeyInput("");
+      setTmdbSettingsMessage({
+        type: "success",
+        text: "TMDB API key saved securely in your local settings.",
+      });
+    } catch (err) {
+      setTmdbSettingsMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setIsSavingTmdbKey(false);
+    }
+  }
+
+  // Test TMDB API connection
+  async function handleTestTmdbKey() {
+    setIsTestingTmdbKey(true);
+    setTmdbSettingsMessage(null);
+    try {
+      const msg = await invoke<string>("test_tmdb_connection", {
+        apiKey: tmdbKeyInput.trim() ? tmdbKeyInput.trim() : null,
+      });
+      setTmdbSettingsMessage({ type: "success", text: msg });
+    } catch (err) {
+      setTmdbSettingsMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setIsTestingTmdbKey(false);
+    }
+  }
+
+  // Auto-identify single media item with TMDB & Gemini AI hands-free
+  async function handleEnrichItem(item: CatalogItem) {
+    setEnrichingItemId(item.id);
+    try {
+      const updated = await invoke<CatalogItem>("auto_identify_media_item", {
+        id: item.id,
+      });
+      setCatalogItems((prev) =>
+        prev.map((c) => (c.id === updated.id ? updated : c))
       );
-      setReviewItem({ catalogItem: item, suggestion });
-      // Keep apiKeyStatus in sync
-      const status = await invoke<ApiKeyStatus>("get_gemini_api_key_status");
-      setApiKeyStatus(status);
+      setEnrichNotice(
+        `✨ Auto-identified "${updated.display_title}" with official artwork & ratings!`
+      );
+      setTimeout(() => setEnrichNotice(null), 5000);
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       if (errMsg.toLowerCase().includes("not configured")) {
         setActiveNav("Settings");
-        setSettingsMessage({
+        setTmdbSettingsMessage({
           type: "info",
-          text: "Please add your GEMINI_API_KEY to your .env file or enter it in Settings.",
+          text: "Please add your TMDB_API_KEY or GEMINI_API_KEY to your .env file or enter it in Settings.",
         });
       } else {
-        window.alert(`AI Classification:\n\n${errMsg}`);
+        window.alert(`Auto-Identify:\n\n${errMsg}`);
+      }
+    } finally {
+      setEnrichingItemId(null);
+    }
+  }
+
+  // Batch auto-identify library items with TMDB & Gemini AI
+  async function handleAutoIdentifyLibrary(silent = false) {
+    setIsEnrichingAllTmdb(true);
+    if (!silent) {
+      setEnrichNotice("✨ Auto-identifying library with TMDB & Gemini AI...");
+    }
+    try {
+      const count = await invoke<number>("auto_identify_all_media");
+      const freshItems = await invoke<CatalogItem[]>("get_catalog");
+      if (freshItems && freshItems.length > 0) {
+        setCatalogItems(freshItems);
+      }
+      if (count > 0 || !silent) {
+        setEnrichNotice(
+          `✨ Successfully auto-identified ${count} item${count === 1 ? "" : "s"} with official posters, genres, and metadata!`
+        );
+        setTimeout(() => setEnrichNotice(null), 7000);
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      if (!silent) {
+        if (errMsg.toLowerCase().includes("not configured")) {
+          setActiveNav("Settings");
+          setTmdbSettingsMessage({
+            type: "info",
+            text: "Please configure your TMDB or Gemini API key in Settings to enable automated identification.",
+          });
+        } else {
+          setEnrichNotice(`Auto-identify notice: ${errMsg}`);
+          setTimeout(() => setEnrichNotice(null), 7000);
+        }
+      }
+    } finally {
+      setIsEnrichingAllTmdb(false);
+    }
+  }
+
+  // Auto-identify single catalog item hands-free without manual review modal
+  async function handleClassifyItem(item: CatalogItem) {
+    setClassifyingItemId(item.id);
+    try {
+      const updated = await invoke<CatalogItem>("auto_identify_media_item", {
+        id: item.id,
+      });
+      setCatalogItems((prev) =>
+        prev.map((c) => (c.id === updated.id ? updated : c))
+      );
+      setEnrichNotice(
+        `✨ Auto-identified "${updated.display_title}" with official artwork & metadata!`
+      );
+      setTimeout(() => setEnrichNotice(null), 5000);
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      if (errMsg.toLowerCase().includes("not configured")) {
+        setActiveNav("Settings");
+        setTmdbSettingsMessage({
+          type: "info",
+          text: "Please add your TMDB_API_KEY or GEMINI_API_KEY to your .env file or enter it in Settings.",
+        });
+      } else {
+        window.alert(`Auto-Identify:\n\n${errMsg}`);
       }
     } finally {
       setClassifyingItemId(null);
     }
   }
 
-  // Save approved AI classification metadata to SQLite
+  // Save approved AI classification metadata to SQLite & auto-enrich with TMDB
   async function handleSaveReview() {
     if (!reviewItem) return;
     setIsSavingMetadata(true);
@@ -429,9 +591,20 @@ function App() {
         metadata: reviewItem.suggestion,
       });
 
-      setCatalogItems((prev) =>
-        prev.map((item) => (item.id === updated.id ? updated : item))
-      );
+      // Automatically attempt TMDB enrichment now that title and year are verified!
+      try {
+        const enriched = await invoke<CatalogItem>("enrich_media_item_with_tmdb", {
+          id: updated.id,
+        });
+        setCatalogItems((prev) =>
+          prev.map((item) => (item.id === enriched.id ? enriched : item))
+        );
+      } catch {
+        setCatalogItems((prev) =>
+          prev.map((item) => (item.id === updated.id ? updated : item))
+        );
+      }
+
       setReviewItem(null);
     } catch (error) {
       window.alert(
@@ -446,14 +619,19 @@ function App() {
 
   // Filter catalog based on active navigation, search query, and genre
   const filteredCatalog = catalogItems.filter((item) => {
+    const q = query.toLowerCase().trim();
     const matchesSearch =
-      item.display_title.toLowerCase().includes(query.toLowerCase()) ||
-      item.filename.toLowerCase().includes(query.toLowerCase());
+      !q ||
+      item.display_title.toLowerCase().includes(q) ||
+      item.filename.toLowerCase().includes(q) ||
+      (item.series_title !== null && item.series_title.toLowerCase().includes(q));
+
+    const isSeries = item.media_type === "series" || item.series_title !== null;
 
     const matchesNav =
       activeNav === "Home" ||
-      (activeNav === "All movies" && item.media_type !== "series") ||
-      (activeNav === "TV shows" && item.media_type === "series") ||
+      (activeNav === "All movies" && !isSeries) ||
+      (activeNav === "TV shows" && isSeries) ||
       (activeNav === "Collections" && item.is_favorite);
 
     const matchesGenre =
@@ -463,6 +641,133 @@ function App() {
 
     return matchesSearch && matchesNav && matchesGenre;
   });
+
+  interface SeriesGroup {
+    seriesTitle: string;
+    episodes: CatalogItem[];
+    seasons: number[];
+    posterUrl: string | null;
+    backdropUrl: string | null;
+    overview: string | null;
+    voteAverage: number | null;
+    genres: string[];
+    totalSizeBytes: number;
+  }
+
+  // Group catalog series items by series_title for organized Series View
+  const seriesGroups: SeriesGroup[] = useMemo(() => {
+    const map = new Map<string, CatalogItem[]>();
+
+    for (const item of catalogItems) {
+      const isSeries = item.media_type === "series" || item.series_title !== null;
+      if (isSeries) {
+        let key = item.series_title?.trim();
+        if (!key) {
+          const seasonMatch = item.display_title.match(/^(.*?)\s+S\d+\s+E\d+/i);
+          key = seasonMatch ? seasonMatch[1].trim() : item.display_title.trim();
+        }
+        if (!map.has(key)) {
+          map.set(key, []);
+        }
+        map.get(key)!.push(item);
+      }
+    }
+
+    const groups: SeriesGroup[] = [];
+
+    for (const [title, eps] of map.entries()) {
+      eps.sort((a, b) => {
+        const sA = a.season_number ?? 1;
+        const sB = b.season_number ?? 1;
+        if (sA !== sB) return sA - sB;
+        const eA = a.episode_number ?? 0;
+        const eB = b.episode_number ?? 0;
+        if (eA !== eB) return eA - eB;
+        return a.display_title.localeCompare(b.display_title);
+      });
+
+      const seasons = Array.from(
+        new Set(eps.map((e) => e.season_number ?? 1))
+      ).sort((a, b) => a - b);
+
+      const posterUrl = eps.find((e) => e.poster_url)?.poster_url || null;
+      const backdropUrl =
+        eps.find((e) => e.backdrop_url)?.backdrop_url || posterUrl;
+      const overview = eps.find((e) => e.overview)?.overview || null;
+
+      const ratings = eps
+        .map((e) => e.vote_average)
+        .filter((r): r is number => r !== null && r > 0);
+      const voteAverage =
+        ratings.length > 0
+          ? ratings.reduce((acc, curr) => acc + curr, 0) / ratings.length
+          : null;
+
+      const genres = Array.from(
+        new Set(
+          eps
+            .flatMap((e) => [e.primary_genre, ...(e.secondary_genres || [])])
+            .filter((g): g is string => !!g && g !== "Unknown")
+        )
+      );
+
+      const totalSizeBytes = eps.reduce((acc, e) => acc + e.size_bytes, 0);
+
+      groups.push({
+        seriesTitle: title,
+        episodes: eps,
+        seasons,
+        posterUrl,
+        backdropUrl,
+        overview,
+        voteAverage,
+        genres,
+        totalSizeBytes,
+      });
+    }
+
+    return groups.sort((a, b) => a.seriesTitle.localeCompare(b.seriesTitle));
+  }, [catalogItems]);
+
+  const filteredSeriesGroups = useMemo(() => {
+    const q = query.toLowerCase().trim();
+    return seriesGroups.filter((group) => {
+      const matchesSearch =
+        !q ||
+        group.seriesTitle.toLowerCase().includes(q) ||
+        group.episodes.some(
+          (e) =>
+            e.display_title.toLowerCase().includes(q) ||
+            e.filename.toLowerCase().includes(q)
+        );
+
+      const matchesGenre =
+        genre === "All" ||
+        group.genres.includes(genre) ||
+        group.episodes.some(
+          (e) =>
+            e.primary_genre === genre || e.secondary_genres.includes(genre)
+        );
+
+      return matchesSearch && matchesGenre;
+    });
+  }, [seriesGroups, query, genre]);
+
+  const currentSeries = useMemo(() => {
+    if (!selectedSeries) return null;
+    return (
+      seriesGroups.find(
+        (g) => g.seriesTitle.toLowerCase() === selectedSeries.toLowerCase()
+      ) || null
+    );
+  }, [seriesGroups, selectedSeries]);
+
+  const visibleEpisodes = useMemo(() => {
+    if (!currentSeries) return [];
+    return currentSeries.episodes.filter(
+      (ep) => selectedSeason === "all" || (ep.season_number ?? 1) === selectedSeason
+    );
+  }, [currentSeries, selectedSeason]);
 
   // Filter sample preview items (when no local media has ever been scanned)
   const filteredSampleMedia = sampleMedia.filter((item) => {
@@ -772,7 +1077,7 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="#" onClick={() => setActiveNav("Home")}>
+        <a className="brand" href="#" onClick={() => handleNavigate("Home")}>
           <span className="brand-mark">
             <Clapperboard size={25} strokeWidth={2.2} />
           </span>
@@ -789,7 +1094,7 @@ function App() {
             <button
               key={label}
               className={`nav-item ${activeNav === label ? "active" : ""}`}
-              onClick={() => setActiveNav(label)}
+              onClick={() => handleNavigate(label)}
             >
               <Icon size={19} />
               <span>{label}</span>
@@ -810,7 +1115,7 @@ function App() {
 
         <button
           className={`nav-item settings-link ${activeNav === "Settings" ? "active" : ""}`}
-          onClick={() => setActiveNav("Settings")}
+          onClick={() => handleNavigate("Settings")}
         >
           <Settings size={19} />
           <span>Settings</span>
@@ -934,6 +1239,126 @@ function App() {
                   rel="noreferrer"
                 >
                   Google AI Studio
+                </a>
+                .
+              </div>
+            </div>
+
+            {/* TMDB Artwork & Ratings Configuration Card */}
+            <div className="settings-card">
+              <h3>TMDB Poster Artwork &amp; Ratings</h3>
+              <p className="settings-description">
+                Flicklet integrates with The Movie Database (TMDB) to fetch official high-definition
+                posters, backdrop artwork, community star ratings, and plot overviews for your movie and series library.
+              </p>
+
+              {tmdbKeyStatus.has_key && (
+                <div className="status-callout info" style={{ marginBottom: 18 }}>
+                  <Sparkles size={16} />
+                  <span>
+                    <strong>Active TMDB Key:</strong> {tmdbKeyStatus.masked_key}{" "}
+                    (Loaded via {tmdbKeyStatus.source})
+                  </span>
+                </div>
+              )}
+
+              <div className="form-group">
+                <label htmlFor="tmdb-key">TMDB API KEY (v3 auth)</label>
+                <div className="settings-input-row">
+                  <div className="settings-input-wrapper">
+                    <input
+                      id="tmdb-key"
+                      type={showTmdbKey ? "text" : "password"}
+                      className="settings-input"
+                      placeholder={
+                        tmdbKeyStatus.has_key
+                          ? `Configured via ${tmdbKeyStatus.source}`
+                          : "Paste 32-character TMDB API key"
+                      }
+                      value={tmdbKeyInput}
+                      onChange={(e) => setTmdbKeyInput(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="visibility-toggle"
+                      onClick={() => setShowTmdbKey(!showTmdbKey)}
+                      title={showTmdbKey ? "Hide Key" : "Show Key"}
+                    >
+                      {showTmdbKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                  <button
+                    className="btn-primary"
+                    onClick={handleSaveTmdbKey}
+                    disabled={isSavingTmdbKey || !tmdbKeyInput.trim()}
+                  >
+                    {isSavingTmdbKey ? (
+                      <Loader2 size={13} className="spin-icon" />
+                    ) : (
+                      <Key size={13} />
+                    )}
+                    <span>Save Key</span>
+                  </button>
+                  <button
+                    className="btn-secondary"
+                    onClick={handleTestTmdbKey}
+                    disabled={
+                      isTestingTmdbKey ||
+                      (!tmdbKeyStatus.has_key && !tmdbKeyInput.trim())
+                    }
+                  >
+                    {isTestingTmdbKey ? (
+                      <Loader2 size={13} className="spin-icon" />
+                    ) : (
+                      <RefreshCw size={13} />
+                    )}
+                    <span>Test Connection</span>
+                  </button>
+                </div>
+              </div>
+
+              {tmdbSettingsMessage && (
+                <div className={`status-callout ${tmdbSettingsMessage.type}`}>
+                  {tmdbSettingsMessage.type === "success" && (
+                    <CheckCircle2 size={16} />
+                  )}
+                  {tmdbSettingsMessage.type === "error" && (
+                    <AlertCircle size={16} />
+                  )}
+                  {tmdbSettingsMessage.type === "info" && (
+                    <Sparkles size={16} />
+                  )}
+                  <span>{tmdbSettingsMessage.text}</span>
+                </div>
+              )}
+
+              <div className="settings-notice">
+                <strong>Configuring via .env file (Recommended):</strong>
+                <br />
+                Add <code>TMDB_API_KEY</code> to your project root <code>.env</code> file:
+                <pre
+                  style={{
+                    margin: "8px 0",
+                    padding: "8px 12px",
+                    background: "var(--blush-light)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    fontSize: 11,
+                    fontFamily: "Consolas, monospace",
+                  }}
+                >
+                  TMDB_API_KEY=your_tmdb_api_key_here
+                </pre>
+                Flicklet automatically detects and loads it. <code>.env</code> is added to <code>.gitignore</code> to keep your credentials safe.
+                <br />
+                <br />
+                Need a free TMDB key? Generate one at{" "}
+                <a
+                  href="https://www.themoviedb.org/settings/api"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  themoviedb.org/settings/api
                 </a>
                 .
               </div>
@@ -1255,6 +1680,7 @@ function App() {
               </div>
             )}
           </div>
+
         ) : (
           /* Main Library View */
           <>
@@ -1547,12 +1973,28 @@ function App() {
             <section className="library-section">
               <div className="section-heading">
                 <div>
-                  <p className="section-kicker">A LITTLE BIT OF EVERYTHING</p>
-                  <h2>{activeNav === "Home" ? "Your collection" : activeNav}</h2>
+                  <p className="section-kicker">
+                    {activeNav === "TV shows" && seriesViewMode === "grouped" && currentSeries
+                      ? "SERIES HUB"
+                      : activeNav === "TV shows" && seriesViewMode === "grouped"
+                      ? "ORGANIZED SERIES COLLECTIONS"
+                      : "A LITTLE BIT OF EVERYTHING"}
+                  </p>
+                  <h2>
+                    {activeNav === "TV shows" && seriesViewMode === "grouped" && currentSeries
+                      ? currentSeries.seriesTitle
+                      : activeNav === "Home"
+                      ? "Your collection"
+                      : activeNav}
+                  </h2>
                 </div>
                 <span className="item-count">
                   {isScanning
                     ? "Scanning..."
+                    : activeNav === "TV shows" && seriesViewMode === "grouped" && currentSeries
+                    ? `${visibleEpisodes.length} episode${visibleEpisodes.length === 1 ? "" : "s"}`
+                    : activeNav === "TV shows" && seriesViewMode === "grouped"
+                    ? `${filteredSeriesGroups.length} series · ${filteredCatalog.length} episodes`
                     : hasCatalog
                     ? `${filteredCatalog.length} titles`
                     : `${filteredSampleMedia.length} titles (preview)`}{" "}
@@ -1663,20 +2105,72 @@ function App() {
                     onChange={(event) => setQuery(event.target.value)}
                   />
                 </div>
-                <label className="genre-select">
-                  <span>Genre</span>
-                  <select
-                    value={genre}
-                    onChange={(event) => setGenre(event.target.value)}
-                  >
-                    {TAXONOMY_GENRES.map((item) => (
-                      <option key={item} value={item}>
-                        {item}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <div className="library-toolbar-actions">
+                  {activeNav === "TV shows" && (
+                    <div className="view-mode-toggle">
+                      <button
+                        type="button"
+                        className={`view-mode-btn ${seriesViewMode === "grouped" ? "active" : ""}`}
+                        onClick={() => {
+                          setSeriesViewMode("grouped");
+                          setSelectedSeries(null);
+                        }}
+                      >
+                        By Series
+                      </button>
+                      <button
+                        type="button"
+                        className={`view-mode-btn ${seriesViewMode === "episodes" ? "active" : ""}`}
+                        onClick={() => setSeriesViewMode("episodes")}
+                      >
+                        All Episodes
+                      </button>
+                    </div>
+                  )}
+
+                  <label className="genre-select">
+                    <span>Genre</span>
+                    <select
+                      value={genre}
+                      onChange={(event) => setGenre(event.target.value)}
+                    >
+                      {TAXONOMY_GENRES.map((item) => (
+                        <option key={item} value={item}>
+                          {item}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {hasCatalog && (
+                    <button
+                      className="btn-enrich-all"
+                      onClick={() => handleAutoIdentifyLibrary(false)}
+                      disabled={isEnrichingAllTmdb || isScanning}
+                      title="Automatically identify titles, genres, posters & metadata using TMDB & Gemini AI"
+                    >
+                      {isEnrichingAllTmdb ? (
+                        <>
+                          <Loader2 size={13} className="spin-icon" />
+                          <span>Auto-Identifying...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles size={13} />
+                          <span>Auto-Identify Library</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
               </div>
+
+              {enrichNotice && (
+                <div className="status-callout success" style={{ marginBottom: 18 }}>
+                  <CheckCircle2 size={16} />
+                  <span>{enrichNotice}</span>
+                </div>
+              )}
 
               {/* Media Grid */}
               {hasCatalog ? (
@@ -1686,6 +2180,363 @@ function App() {
                     <h3>Scanning and syncing library...</h3>
                     <p>Updating SQLite catalog with discovered media files</p>
                   </div>
+                ) : activeNav === "TV shows" && seriesViewMode === "grouped" ? (
+                  currentSeries ? (
+                    /* Detailed Series Hub */
+                    <div className="series-hub">
+                      <button
+                        type="button"
+                        className="series-back-btn"
+                        onClick={() => {
+                          setSelectedSeries(null);
+                          setSelectedSeason("all");
+                        }}
+                      >
+                        <ArrowLeft size={14} />
+                        <span>Back to all TV series</span>
+                      </button>
+
+                      <div
+                        className="series-hero-banner"
+                        style={
+                          currentSeries.backdropUrl
+                            ? { backgroundImage: `url(${currentSeries.backdropUrl})` }
+                            : undefined
+                        }
+                      >
+                        <div className="series-hero-overlay" />
+                        {currentSeries.posterUrl && (
+                          <div className="series-hero-poster">
+                            <img
+                              src={currentSeries.posterUrl}
+                              alt={currentSeries.seriesTitle}
+                              onError={(e) => {
+                                (e.currentTarget as HTMLElement).style.display = "none";
+                              }}
+                            />
+                          </div>
+                        )}
+                        <div className="series-hero-info">
+                          <div className="series-hero-meta">
+                            <span className="genre-chip" style={{ margin: 0 }}>
+                              {currentSeries.genres[0] || "TV Series"}
+                            </span>
+                            {currentSeries.voteAverage !== null && currentSeries.voteAverage > 0 && (
+                              <span className="series-hero-rating">
+                                <Star size={12} fill="#f6c854" stroke="#f6c854" />
+                                <span>{currentSeries.voteAverage.toFixed(1)} / 10 TMDB</span>
+                              </span>
+                            )}
+                            <span>•</span>
+                            <span>
+                              {currentSeries.seasons.length}{" "}
+                              {currentSeries.seasons.length === 1 ? "Season" : "Seasons"}
+                            </span>
+                            <span>•</span>
+                            <span>
+                              {currentSeries.episodes.length}{" "}
+                              {currentSeries.episodes.length === 1 ? "Episode" : "Episodes"}
+                            </span>
+                            <span>•</span>
+                            <span>{formatBytes(currentSeries.totalSizeBytes)}</span>
+                          </div>
+                          <h1 className="series-hero-title">{currentSeries.seriesTitle}</h1>
+                          {currentSeries.overview && (
+                            <p className="series-hero-overview">{currentSeries.overview}</p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Season Selector Bar */}
+                      {currentSeries.seasons.length > 1 && (
+                        <div className="season-selector-bar">
+                          <button
+                            type="button"
+                            className={`season-pill ${selectedSeason === "all" ? "active" : ""}`}
+                            onClick={() => setSelectedSeason("all")}
+                          >
+                            All Seasons ({currentSeries.episodes.length})
+                          </button>
+                          {currentSeries.seasons.map((s) => {
+                            const count = currentSeries.episodes.filter(
+                              (e) => (e.season_number ?? 1) === s
+                            ).length;
+                            return (
+                              <button
+                                key={s}
+                                type="button"
+                                className={`season-pill ${selectedSeason === s ? "active" : ""}`}
+                                onClick={() => setSelectedSeason(s)}
+                              >
+                                Season {s} ({count})
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Episode Rows Grid */}
+                      <div className="episodes-grid">
+                        {visibleEpisodes.map((ep) => {
+                          const isClassifying = classifyingItemId === ep.id;
+                          const isEnriching = enrichingItemId === ep.id;
+                          return (
+                            <article className="episode-row-card" key={ep.id}>
+                              <div className="episode-still">
+                                {ep.poster_url ? (
+                                  <img
+                                    src={ep.poster_url}
+                                    alt={ep.display_title}
+                                    loading="lazy"
+                                    onError={(e) => {
+                                      (e.currentTarget as HTMLElement).style.display = "none";
+                                    }}
+                                  />
+                                ) : (
+                                  <div className="episode-still-fallback">
+                                    <span>📺</span>
+                                  </div>
+                                )}
+                                <span className="episode-badge-pill">
+                                  S{ep.season_number ?? 1} E{ep.episode_number ?? 1}
+                                </span>
+                                {ep.vote_average !== null && ep.vote_average > 0 && (
+                                  <span className="episode-rating-pill">
+                                    <Star size={9} fill="#ffd166" stroke="#ffd166" />
+                                    <span>{ep.vote_average.toFixed(1)}</span>
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="episode-details">
+                                <div>
+                                  <div className="episode-header">
+                                    <h4 className="episode-title">{ep.display_title}</h4>
+                                    <button
+                                      className={`favorite-button ${
+                                        ep.is_favorite ? "favorited" : ""
+                                      }`}
+                                      aria-label={`Favorite ${ep.display_title}`}
+                                      onClick={() => handleToggleFavorite(ep.id)}
+                                    >
+                                      <Heart size={16} />
+                                    </button>
+                                  </div>
+                                  {ep.overview && (
+                                    <p className="episode-overview" title={ep.overview}>
+                                      {ep.overview}
+                                    </p>
+                                  )}
+                                </div>
+
+                                <div className="episode-footer">
+                                  <div className="episode-file-meta" title={ep.path}>
+                                    {formatBytes(ep.size_bytes)} · {ep.extension.toUpperCase()} ·{" "}
+                                    {ep.filename}
+                                  </div>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                    <button
+                                      type="button"
+                                      className="btn-play-default"
+                                      onClick={() =>
+                                        isVlcAvailable
+                                          ? handlePlayInVlc(ep.path, null)
+                                          : handleOpenDefaultPlayer(ep.path)
+                                      }
+                                      style={{
+                                        background: "var(--cherry)",
+                                        color: "#fffdfa",
+                                        borderColor: "var(--cherry)",
+                                        padding: "5px 11px",
+                                        fontSize: 11,
+                                      }}
+                                    >
+                                      <Play size={11} fill="currentColor" />
+                                      <span>Play Episode</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn-play-default"
+                                      onClick={() => handleRevealInExplorer(ep.path)}
+                                      title="Show in Windows Explorer"
+                                      style={{ padding: "5px 9px", fontSize: 11 }}
+                                    >
+                                      <span>Folder</span>
+                                    </button>
+                                    {ep.ai_status === "approved" ? (
+                                      <span className="badge-ai-approved">
+                                        <Sparkles size={10} /> Verified
+                                      </span>
+                                    ) : (
+                                      <button
+                                        className="btn-ai-classify"
+                                        onClick={() => handleClassifyItem(ep)}
+                                        disabled={isClassifying}
+                                        title="Auto-identify episode with TMDB & Gemini AI"
+                                      >
+                                        {isClassifying ? (
+                                          <Loader2 size={11} className="spin-icon" />
+                                        ) : (
+                                          <Sparkles size={11} />
+                                        )}
+                                        <span>Auto-Identify</span>
+                                      </button>
+                                    )}
+                                    <button
+                                      className="btn-tmdb-enrich"
+                                      onClick={() => handleEnrichItem(ep)}
+                                      disabled={isEnriching}
+                                      title="Refresh TMDB episode details"
+                                    >
+                                      {isEnriching ? (
+                                        <Loader2 size={10} className="spin-icon" />
+                                      ) : (
+                                        <ImageIcon size={10} />
+                                      )}
+                                      <span>TMDB</span>
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : filteredSeriesGroups.length > 0 ? (
+                    /* Series Cards Grid */
+                    <div className="movie-grid">
+                      {filteredSeriesGroups.map((show, idx) => {
+                        const tones = [
+                          "poster-wolf",
+                          "poster-romance",
+                          "poster-mystery",
+                          "poster-horror",
+                        ];
+                        const tone = tones[idx % tones.length];
+                        return (
+                          <article
+                            className="movie-card"
+                            key={show.seriesTitle}
+                            onClick={() => {
+                              setSelectedSeries(show.seriesTitle);
+                              setSelectedSeason("all");
+                            }}
+                            style={{ cursor: "pointer" }}
+                          >
+                            <div
+                              className={`poster ${tone}`}
+                              title={`View ${show.seriesTitle} Episodes`}
+                            >
+                              {show.posterUrl ? (
+                                <>
+                                  <img
+                                    src={show.posterUrl}
+                                    alt={show.seriesTitle}
+                                    className="poster-img"
+                                    loading="lazy"
+                                    onError={(e) => {
+                                      (e.currentTarget as HTMLElement).style.display = "none";
+                                    }}
+                                  />
+                                  <div className="poster-overlay-gradient" />
+                                  {show.voteAverage !== null && show.voteAverage > 0 && (
+                                    <span
+                                      className="poster-rating-badge"
+                                      title={`TMDB Rating: ${show.voteAverage.toFixed(1)} / 10`}
+                                    >
+                                      <Star size={11} fill="#f6c854" stroke="#f6c854" />
+                                      <span>{show.voteAverage.toFixed(1)}</span>
+                                    </span>
+                                  )}
+                                  <span className="series-count-badge">
+                                    <Tv size={11} />
+                                    <span>
+                                      {show.seasons.length}{" "}
+                                      {show.seasons.length === 1 ? "Season" : "Seasons"} ·{" "}
+                                      {show.episodes.length} Eps
+                                    </span>
+                                  </span>
+                                  <span
+                                    className="poster-title"
+                                    style={{ position: "relative", zIndex: 1 }}
+                                  >
+                                    {show.seriesTitle}
+                                  </span>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="poster-symbol">📺</span>
+                                  <span className="poster-title">{show.seriesTitle}</span>
+                                  <span className="series-count-badge">
+                                    <Tv size={11} />
+                                    <span>
+                                      {show.seasons.length} Season(s) · {show.episodes.length} Eps
+                                    </span>
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                            <div className="movie-info">
+                              <div style={{ minWidth: 0, overflow: "hidden" }}>
+                                <h3
+                                  title={show.seriesTitle}
+                                  style={{
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {show.seriesTitle}
+                                </h3>
+                                <p>
+                                  {show.seasons.length}{" "}
+                                  {show.seasons.length === 1 ? "Season" : "Seasons"} ·{" "}
+                                  {show.episodes.length} Episodes · {formatBytes(show.totalSizeBytes)}
+                                </p>
+                                {show.overview && (
+                                  <p className="card-overview" title={show.overview}>
+                                    {show.overview}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                            <div className="card-actions">
+                              <span className="genre-chip" style={{ marginTop: 0 }}>
+                                {show.genres[0] || "TV Series"}
+                              </span>
+                              <button
+                                type="button"
+                                className="btn-play-default"
+                                style={{
+                                  background: "var(--cherry)",
+                                  color: "#fffdfa",
+                                  borderColor: "var(--cherry)",
+                                  padding: "4px 10px",
+                                  fontSize: 10,
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedSeries(show.seriesTitle);
+                                  setSelectedSeason("all");
+                                }}
+                              >
+                                <span>View Episodes ↗</span>
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="empty-state">
+                      <Tv size={32} />
+                      <h3>No TV series found</h3>
+                      <p>
+                        Try searching with another keyword or ensure your video files are scanned.
+                      </p>
+                    </div>
+                  )
                 ) : filteredCatalog.length > 0 ? (
                   <div className="movie-grid">
                     {filteredCatalog.map((item, idx) => {
@@ -1703,18 +2554,89 @@ function App() {
                       return (
                         <article className="movie-card" key={item.id}>
                           <div className={`poster ${tone}`} title={item.path}>
-                            <span className="poster-symbol">{symbol}</span>
-                            <span className="poster-title">
-                              {item.display_title}
-                            </span>
-                            <span className="poster-year">
-                              {item.release_year
-                                ? item.release_year
-                                : formatBytes(item.size_bytes)}
-                            </span>
-                            <span className="poster-type">
-                              {item.extension.toUpperCase()}
-                            </span>
+                            {item.poster_url ? (
+                              <>
+                                <img
+                                  src={item.poster_url}
+                                  alt={item.display_title}
+                                  className="poster-img"
+                                  loading="lazy"
+                                  onError={(e) => {
+                                    (e.currentTarget as HTMLElement).style.display = "none";
+                                  }}
+                                />
+                                <div className="poster-overlay-gradient" />
+                                {item.vote_average != null && item.vote_average > 0 && (
+                                  <span
+                                    className="poster-rating-badge"
+                                    title={`TMDB Rating: ${item.vote_average.toFixed(1)} / 10`}
+                                  >
+                                    <Star size={11} fill="#f6c854" stroke="#f6c854" />
+                                    <span>{item.vote_average.toFixed(1)}</span>
+                                  </span>
+                                )}
+                                {item.season_number && item.episode_number ? (
+                                  <span
+                                    className="poster-type"
+                                    style={{
+                                      background: "rgba(30, 15, 24, 0.9)",
+                                      color: "#fff",
+                                      border: "1px solid rgba(255, 255, 255, 0.3)",
+                                      fontWeight: 700,
+                                    }}
+                                  >
+                                    S{item.season_number} E{item.episode_number}
+                                  </span>
+                                ) : (
+                                  <span className="poster-type">
+                                    {item.extension.toUpperCase()}
+                                  </span>
+                                )}
+                                <span
+                                  className="poster-title"
+                                  style={{ position: "relative", zIndex: 1 }}
+                                >
+                                  {item.display_title}
+                                </span>
+                                <span
+                                  className="poster-year"
+                                  style={{ position: "relative", zIndex: 1 }}
+                                >
+                                  {item.release_year
+                                    ? item.release_year
+                                    : formatBytes(item.size_bytes)}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="poster-symbol">{symbol}</span>
+                                <span className="poster-title">
+                                  {item.display_title}
+                                </span>
+                                <span className="poster-year">
+                                  {item.release_year
+                                    ? item.release_year
+                                    : formatBytes(item.size_bytes)}
+                                </span>
+                                {item.season_number && item.episode_number ? (
+                                  <span
+                                    className="poster-type"
+                                    style={{
+                                      background: "rgba(30, 15, 24, 0.9)",
+                                      color: "#fff",
+                                      border: "1px solid rgba(255, 255, 255, 0.3)",
+                                      fontWeight: 700,
+                                    }}
+                                  >
+                                    S{item.season_number} E{item.episode_number}
+                                  </span>
+                                ) : (
+                                  <span className="poster-type">
+                                    {item.extension.toUpperCase()}
+                                  </span>
+                                )}
+                              </>
+                            )}
                           </div>
                           <div className="movie-info">
                             <div style={{ minWidth: 0, overflow: "hidden" }}>
@@ -1732,6 +2654,11 @@ function App() {
                                 {formatBytes(item.size_bytes)}{" "}
                                 <span>·</span> {item.extension.toUpperCase()}
                               </p>
+                              {item.overview && (
+                                <p className="card-overview" title={item.overview}>
+                                  {item.overview}
+                                </p>
+                              )}
                               <div
                                 className="video-path-preview"
                                 title={item.path}
@@ -1774,40 +2701,61 @@ function App() {
                                 <Play size={11} fill="currentColor" />
                               </button>
                               <span className="genre-chip" style={{ marginTop: 0 }}>
-                                {item.primary_genre ||
-                                  (item.media_type === "series"
-                                    ? "Series"
-                                    : "Local File")}
+                                {item.primary_genre && item.primary_genre !== "Unknown"
+                                  ? item.primary_genre
+                                  : item.media_type === "series" || item.series_title !== null
+                                  ? "Series"
+                                  : "Movie"}
                               </span>
                             </div>
 
-                            {item.ai_status === "approved" ? (
-                              <span
-                                className="badge-ai-approved"
-                                title="Metadata verified with AI"
-                              >
-                                <Sparkles size={10} /> Verified
-                              </span>
-                            ) : (
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              {item.ai_status === "approved" ? (
+                                <span
+                                  className="badge-ai-approved"
+                                  title="Metadata verified with TMDB & AI"
+                                >
+                                  <Sparkles size={10} /> Verified
+                                </span>
+                              ) : (
+                                <button
+                                  className="btn-ai-classify"
+                                  onClick={() => handleClassifyItem(item)}
+                                  disabled={isClassifying}
+                                  title="Auto-identify title, genre & artwork with TMDB & Gemini AI"
+                                >
+                                  {isClassifying ? (
+                                    <>
+                                      <Loader2 size={11} className="spin-icon" />
+                                      <span>Identifying...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Sparkles size={11} />
+                                      <span>Auto-Identify</span>
+                                    </>
+                                  )}
+                                </button>
+                              )}
+
                               <button
-                                className="btn-ai-classify"
-                                onClick={() => handleClassifyItem(item)}
-                                disabled={isClassifying}
-                                title="Identify with Gemini AI"
+                                className="btn-tmdb-enrich"
+                                onClick={() => handleEnrichItem(item)}
+                                disabled={enrichingItemId === item.id}
+                                title={
+                                  item.poster_url
+                                    ? "Refresh TMDB Poster & Artwork"
+                                    : "Fetch TMDB Poster & Artwork"
+                                }
                               >
-                                {isClassifying ? (
-                                  <>
-                                    <Loader2 size={11} className="spin-icon" />
-                                    <span>AI...</span>
-                                  </>
+                                {enrichingItemId === item.id ? (
+                                  <Loader2 size={10} className="spin-icon" />
                                 ) : (
-                                  <>
-                                    <WandSparkles size={11} />
-                                    <span>AI Identify</span>
-                                  </>
+                                  <ImageIcon size={10} />
                                 )}
+                                <span>{item.poster_url ? "TMDB" : "Poster"}</span>
                               </button>
-                            )}
+                            </div>
                           </div>
                         </article>
                       );

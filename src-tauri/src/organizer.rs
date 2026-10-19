@@ -117,9 +117,20 @@ pub fn build_proposed_relative_path(item: &CatalogItem) -> (PathBuf, String) {
         let episode_num = item.episode_number.unwrap_or(1);
         let season_folder = format!("Season {:02}", season_num);
 
+        let ep_title_part = if let Some(idx) = item.display_title.find(": ") {
+            let sub = item.display_title[idx + 2..].trim();
+            if !sub.is_empty() {
+                format!(" - {}", sanitize_component(sub))
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
         let final_filename = format!(
-            "{} - S{:02}E{:02}.{}",
-            series_name, season_num, episode_num, ext
+            "{} - S{:02}E{:02}{}.{}",
+            series_name, season_num, episode_num, ep_title_part, ext
         );
         let rel_path = PathBuf::from("TV Shows")
             .join(&series_name)

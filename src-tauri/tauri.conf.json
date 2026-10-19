@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "flicklet",
+  "productName": "Flicklet",
   "version": "0.1.0",
   "identifier": "com.devth.flicklet",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "flicklet",
-        "width": 800,
-        "height": 600
+        "title": "Flicklet — your cozy cinema",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640
       }
     ],
     "security": {
